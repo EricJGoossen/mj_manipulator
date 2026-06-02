@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 import mujoco
 import numpy as np
 from pycbirrt import CBiRRT, CBiRRTConfig
+from pycbirrt.exceptions import PlanningError
 from tsr import TSR
 
 from mj_manipulator.collision import CollisionChecker
@@ -735,12 +736,20 @@ class Arm:
         """
         config = self._make_planner_config(timeout, planner_config, abort_fn=abort_fn)
         planner = self.create_planner(config)
-        path = planner.plan(
-            start=self.get_joint_positions(),
-            goal=q_goal,
-            constraint_tsrs=constraint_tsrs,
-            seed=seed,
-        )
+        try:
+            path = planner.plan(
+                start=self.get_joint_positions(),
+                goal=q_goal,
+                constraint_tsrs=constraint_tsrs,
+                seed=seed,
+            )
+        except (PlanningError, ValueError) as e:
+            # Start/goal in collision or unreachable (PlanningError) or no
+            # configs provided at all (ValueError) is a planning failure, not
+            # an exceptional condition — return None like "no path found" so
+            # callers handle all planning failures uniformly.
+            logger.info("Plan to configuration failed: %s", e)
+            return None
         if path is not None:
             logger.info("Plan to configuration succeeded: %d waypoints", len(path))
         else:
@@ -772,12 +781,16 @@ class Arm:
         """
         config = self._make_planner_config(timeout, planner_config, abort_fn=abort_fn)
         planner = self.create_planner(config)
-        return planner.plan(
-            start=self.get_joint_positions(),
-            goal=q_goals,
-            constraint_tsrs=constraint_tsrs,
-            seed=seed,
-        )
+        try:
+            return planner.plan(
+                start=self.get_joint_positions(),
+                goal=q_goals,
+                constraint_tsrs=constraint_tsrs,
+                seed=seed,
+            )
+        except (PlanningError, ValueError) as e:
+            logger.info("Plan to configurations failed: %s", e)
+            return None
 
     def plan_to_tsrs(
         self,
@@ -813,13 +826,21 @@ class Arm:
             raise RuntimeError("plan_to_tsrs requires an IK solver. Pass ik_solver= to the Arm constructor.")
         config = self._make_planner_config(timeout, planner_config, abort_fn=abort_fn)
         planner = self.create_planner(config)
-        result = planner.plan(
-            start=self.get_joint_positions(),
-            goal_tsrs=goal_tsrs,
-            constraint_tsrs=constraint_tsrs,
-            seed=seed,
-            return_details=return_details,
-        )
+        try:
+            result = planner.plan(
+                start=self.get_joint_positions(),
+                goal_tsrs=goal_tsrs,
+                constraint_tsrs=constraint_tsrs,
+                seed=seed,
+                return_details=return_details,
+            )
+        except (PlanningError, ValueError) as e:
+            # All goal/start configs invalid/unreachable/in-collision
+            # (PlanningError) or no goal TSRs provided at all (ValueError) is a
+            # planning failure — return None so callers (e.g. feeding behaviors)
+            # get a uniform "no plan" signal instead of an escaping exception.
+            logger.info("Plan to TSRs failed: %s", e)
+            return None
         if return_details:
             if result is not None and result.success:
                 logger.info(

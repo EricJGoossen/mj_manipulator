@@ -332,3 +332,77 @@ class TestErrors:
         arm = Arm(ur5e_env, config)
         with pytest.raises(RuntimeError, match="No ee_site"):
             arm.get_ee_pose()
+
+
+class TestPlannerFailureReturnsNone:
+    """Planner failures (start/goal invalid, unreachable, or in collision)
+    return None, not an escaping PlanningError — so callers handle every
+    planning failure uniformly via ``if path is None``."""
+
+    class _RaisingPlanner:
+        def __init__(self, exc):
+            self._exc = exc
+
+        def plan(self, **kwargs):
+            raise self._exc
+
+    def test_plan_to_configuration_returns_none(self, franka_arm_at_home, monkeypatch):
+        from pycbirrt.exceptions import AllStartConfigurationsInCollision
+
+        arm = franka_arm_at_home
+        monkeypatch.setattr(
+            arm, "create_planner",
+            lambda config: self._RaisingPlanner(AllStartConfigurationsInCollision(1)),
+        )
+        assert arm.plan_to_configuration(arm.get_joint_positions()) is None
+
+    def test_plan_to_configurations_returns_none(self, franka_arm_at_home, monkeypatch):
+        from pycbirrt.exceptions import AllGoalConfigurationsInvalid
+
+        arm = franka_arm_at_home
+        monkeypatch.setattr(
+            arm, "create_planner",
+            lambda config: self._RaisingPlanner(AllGoalConfigurationsInvalid(5)),
+        )
+        assert arm.plan_to_configurations([arm.get_joint_positions()]) is None
+
+    def test_plan_to_tsrs_returns_none(self, franka_arm_at_home, monkeypatch):
+        from pycbirrt.exceptions import AllGoalConfigurationsInvalid
+        from tsr.tsr import TSR
+
+        arm = franka_arm_at_home
+        monkeypatch.setattr(
+            arm, "create_planner",
+            lambda config: self._RaisingPlanner(AllGoalConfigurationsInvalid(100)),
+        )
+        tsr = TSR(T0_w=np.eye(4), Tw_e=np.eye(4), Bw=np.zeros((6, 2)))
+        assert arm.plan_to_tsrs([tsr]) is None
+
+    def test_plan_to_configuration_value_error_returns_none(self, franka_arm_at_home, monkeypatch):
+        # The planner raises a bare ValueError ("No valid configurations
+        # available") for an empty/absent goal — also a planning failure.
+        arm = franka_arm_at_home
+        monkeypatch.setattr(
+            arm, "create_planner",
+            lambda config: self._RaisingPlanner(ValueError("No valid start configurations available")),
+        )
+        assert arm.plan_to_configuration(arm.get_joint_positions()) is None
+
+    def test_plan_to_configurations_value_error_returns_none(self, franka_arm_at_home, monkeypatch):
+        arm = franka_arm_at_home
+        monkeypatch.setattr(
+            arm, "create_planner",
+            lambda config: self._RaisingPlanner(ValueError("No valid goal configurations available")),
+        )
+        assert arm.plan_to_configurations([arm.get_joint_positions()]) is None
+
+    def test_plan_to_tsrs_value_error_returns_none(self, franka_arm_at_home, monkeypatch):
+        from tsr.tsr import TSR
+
+        arm = franka_arm_at_home
+        monkeypatch.setattr(
+            arm, "create_planner",
+            lambda config: self._RaisingPlanner(ValueError("No valid goal configurations available")),
+        )
+        tsr = TSR(T0_w=np.eye(4), Tw_e=np.eye(4), Bw=np.zeros((6, 2)))
+        assert arm.plan_to_tsrs([tsr]) is None
