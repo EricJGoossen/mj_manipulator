@@ -69,7 +69,7 @@ class SimArmController:
         self._arm = arm
         self._context = context
 
-    def grasp(self, object_name: str | None = None) -> str | None:
+    def grasp(self, object_name: str | None = None, synchronous: bool = True) -> str | None:
         """Close gripper and attempt to grasp an object.
 
         In physics mode: gradually closes the gripper with contact detection.
@@ -169,7 +169,7 @@ class SimArmController:
         arm_name = self._arm.config.name
         self._context._controller.close_gripper(arm_name, candidate_objects=candidates)
 
-    def release(self, object_name: str | None = None) -> None:
+    def release(self, object_name: str | None = None, synchronous: bool = True) -> None:
         """Open gripper and release held object(s).
 
         Args:
@@ -928,10 +928,15 @@ class SimContext:
         """Create KinematicController and per-arm executor wrappers."""
         from mj_manipulator.kinematic_controller import KinematicController
 
+        exec_config = None
+        if self._physics_config is not None:
+            exec_config = self._physics_config.execution
+
         self._controller = KinematicController(
             self._model,
             self._data,
             self._arms,
+            config=exec_config
             viewer=self._viewer,
             viewer_sync_interval=viewer_sync_interval,
             initial_positions=self._initial_positions,
