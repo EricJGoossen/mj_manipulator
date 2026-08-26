@@ -58,6 +58,22 @@ class EntityConfig:
     entity_type: str  # Category: "arm", "base", "gripper"
     joint_names: list[str]  # MuJoCo joint names this entity controls
 
+@dataclass
+class ArmGroupConfig(EntityConfig):
+    """Configuration for a group of arms.
+
+    This is used by MultiArmController to manage multiple arms in a single
+    environment. Each arm has its own ArmConfig, but the group config
+    defines shared parameters (e.g., collision checking, planning defaults).
+    """
+    planning_defaults: PlanningDefaults = field(default_factory=PlanningDefaults)
+
+    max_bimanual_IK_solutions: int = 20
+    """Maximum number of IK solutions to return for a bimanual pose."""
+
+    def __post_init__(self):
+        """Set entity_type to arm_group."""
+        object.__setattr__(self, "entity_type", "arm_group")
 
 @dataclass
 class ArmConfig(EntityConfig):

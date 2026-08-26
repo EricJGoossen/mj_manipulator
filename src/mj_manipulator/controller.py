@@ -32,6 +32,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     from mj_manipulator.arm import Arm
+    from mj_manipulator.arm_group import ArmGroup
     from mj_manipulator.config import ExecutionConfig
     from mj_manipulator.protocols import Gripper
     from mj_manipulator.trajectory import Trajectory
@@ -291,7 +292,7 @@ class Controller(ABC):
         self,
         model: mujoco.MjModel,
         data: mujoco.MjData,
-        arms: dict[str, Arm],
+        arm_group: ArmGroup,
         *,
         config: ExecutionConfig | None = None,
         gripper_config: object | None = None,
@@ -321,7 +322,7 @@ class Controller(ABC):
         self._arms: dict[str, _ArmState] = {}
         self._grippers: dict[str, _GripperState] = {}
 
-        for name, arm in arms.items():
+        for name, arm in arm_group.arms.items():
             if initial_positions and name in initial_positions:
                 target_pos = np.asarray(initial_positions[name]).copy()
             else:

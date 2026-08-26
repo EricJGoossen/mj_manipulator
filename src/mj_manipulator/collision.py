@@ -201,6 +201,22 @@ class CollisionChecker:
 
         return contacts
 
+    def body_ids_for_joints(self, joint_names: list[str], extra_body_names: list[str] | None = None) -> set[int]:
+        ids: set[int] = set()
+        for name in joint_names:
+            joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
+            if joint_id == -1:
+                raise ValueError(f"Joint '{name}' not found in model")
+            body_id = self.model.jnt_bodyid[joint_id]
+            ids.add(body_id)
+            ids.update(self._get_body_and_descendants(body_id))
+        for name in extra_body_names or []:
+            bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
+            if bid >= 0:
+                ids.add(bid)
+                ids.update(self._get_body_and_descendants(bid))
+        return ids
+
     def is_valid_batch(self, qs: np.ndarray) -> np.ndarray:
         """Check multiple configurations for collisions."""
         results = np.zeros(len(qs), dtype=bool)

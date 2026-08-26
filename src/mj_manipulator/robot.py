@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from mj_manipulator.arm import Arm
+    from mj_manipulator.arm_group import ArmGroup
     from mj_manipulator.grasp_manager import GraspManager
     from mj_manipulator.protocols import GraspSource
 
@@ -55,7 +56,7 @@ class ManipulationRobot(Protocol):
     def data(self) -> mujoco.MjData: ...
 
     @property
-    def arms(self) -> dict[str, Arm]:
+    def arms(self) -> ArmGroup:
         """All arms, keyed by name (e.g. {"left": arm, "right": arm})."""
         ...
 
@@ -101,7 +102,7 @@ class RobotBase:
         self,
         model: mujoco.MjModel,
         data: mujoco.MjData,
-        arms: dict[str, Arm],
+        arm_group: ArmGroup,
         grasp_manager: GraspManager,
         named_poses: dict[str, dict[str, list[float]]] | None = None,
         grasp_source: GraspSource | None = None,
@@ -109,7 +110,7 @@ class RobotBase:
     ):
         self.model = model
         self.data = data
-        self.arms = arms
+        self.arm_group = arm_group
         self.grasp_manager = grasp_manager
         self.named_poses = named_poses or {}
         self._grasp_source = grasp_source
@@ -124,7 +125,7 @@ class RobotBase:
         # can set ``arm.gripper.grasp_verifier`` before or after super().__init__.
         from mj_manipulator.grasp_verifier import GraspVerifier
 
-        for arm in arms.values():
+        for arm in self.arm_group.arms.values():
             gripper = arm.gripper
             if gripper is not None and gripper.grasp_verifier is None:
                 gripper.grasp_verifier = GraspVerifier(gripper=gripper, signals=[])
@@ -149,8 +150,8 @@ class RobotBase:
 
     def __getitem__(self, arm_name: str) -> _ArmScope:
         """Get a per-arm accessor: robot["franka"].get_ee_pose()"""
-        if arm_name not in self.arms:
-            raise KeyError(f"Unknown arm: {arm_name}. Available: {list(self.arms.keys())}")
+        if arm_name not in self.arm_group.arms:
+            raise KeyError(f"Unknown arm: {arm_name}. Available: {list(self.arm_group.arms.keys())}")
         return _ArmScope(self, arm_name)
 
     # -- Execution context -----------------------------------------------------
@@ -162,7 +163,7 @@ class RobotBase:
         inner = SimContext(
             self.model,
             self.data,
-            self.arms,
+            self.arm_group,
             physics=physics,
             headless=headless,
             viewer=viewer,
@@ -260,7 +261,7 @@ class RobotBase:
 
         # 2. Move arms to "ready" if defined.
         ready = self.named_poses.get("ready", {})
-        for arm_name, arm in self.arms.items():
+        for arm_name, arm in self.arm_group.arms.items():
             if arm_name in ready:
                 q = ready[arm_name]
                 for i, idx in enumerate(arm.joint_qpos_indices):
@@ -297,7 +298,7 @@ class RobotBase:
 
     def holding(self):
         """Get (arm_name, object_name) if any arm is holding, else None."""
-        for arm_name, arm in self.arms.items():
+        for arm_name, arm in self.arm_group.arms.items():
             if arm.gripper and arm.gripper.is_holding and arm.gripper.held_object:
                 return (arm_name, arm.gripper.held_object)
         return None
@@ -340,15 +341,8 @@ class RobotBase:
             self._context.sync()
 
     def check_collisions(self, arm_name: str | None = None):
-        """Print collision contacts for one or all arms.
-
-        Args:
-            arm_name: Specific arm, or None for all arms.
-        """
-        arms_to_check = [arm_name] if arm_name else list(self.arms.keys())
-        for name in arms_to_check:
-            arm = self.arms[name]
-            arm.check_collisions()
+        """Print collision contacts for one or all arms."""
+        self.arm_group.check_collisions(arm_name=arm_name)
 
 
 class _ArmScope:
@@ -371,7 +365,7 @@ class _ArmScope:
 
     @property
     def _arm(self):
-        return self._robot.arms[self._arm_name]
+        return self._robot.arm_group.arm(self._arm_name)
 
     def __getattr__(self, name):
         return getattr(self._arm, name)
@@ -406,7 +400,7 @@ class _ArmScope:
 
     def check_collisions(self):
         """Print collision contacts for this arm."""
-        self._arm.check_collisions()
+        self._robot.arm_group.check_collisions(arm_name=self._arm_name)
 
     def __repr__(self):
         return f"ArmScope({self._arm_name})"

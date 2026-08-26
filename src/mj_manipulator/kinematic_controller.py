@@ -26,6 +26,7 @@ from mj_manipulator.controller import Controller
 
 if TYPE_CHECKING:
     from mj_manipulator.arm import Arm
+    from mj_manipulator.arm_group import ArmGroup
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ class KinematicController(Controller):
     Args:
         model: MuJoCo model.
         data: MuJoCo data (modified during execution).
-        arms: Dict mapping arm names to Arm instances.
+        arm_group: ArmGroup instance.
         config: Execution parameters. Defaults to 250 Hz control_dt.
         viewer: Optional viewer to sync during execution.
         viewer_sync_interval: Minimum seconds between viewer syncs.
@@ -60,7 +61,7 @@ class KinematicController(Controller):
         self,
         model: mujoco.MjModel,
         data: mujoco.MjData,
-        arms: dict[str, Arm],
+        arm_group: ArmGroup,
         *,
         config: ExecutionConfig | None = None,
         viewer=None,
@@ -74,7 +75,7 @@ class KinematicController(Controller):
         super().__init__(
             model,
             data,
-            arms,
+            arm_group.arms,
             config=config,
             gripper_config=None,
             viewer=viewer,

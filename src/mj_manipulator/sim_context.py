@@ -37,6 +37,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     from mj_manipulator.arm import Arm
+    from mj_manipulator.arm_group import ArmGroup
     from mj_manipulator.config import PhysicsConfig
     from mj_manipulator.controller import Controller
     from mj_manipulator.event_loop import PhysicsEventLoop
@@ -255,7 +256,7 @@ class SimContext:
         self,
         model: mujoco.MjModel,
         data: mujoco.MjData,
-        arms: dict[str, Arm],
+        arm_group: ArmGroup,
         *,
         physics: bool = True,
         headless: bool = False,
@@ -269,7 +270,7 @@ class SimContext:
     ):
         self._model = model
         self._data = data
-        self._arms = arms
+        self._arm_group = arm_group
         self._entities = entities or {}
         self._physics = physics
         self._headless = headless
@@ -324,7 +325,7 @@ class SimContext:
             self._setup_kinematic(viewer_sync_interval)
 
         # Mark F/T sensors as valid in physics mode (always valid on hardware)
-        for arm in self._arms.values():
+        for arm in self._arm_group.arms.values():
             arm.ft_valid = self._physics
 
         # Wire event loop to controller (both physics and kinematic modes)
@@ -334,7 +335,7 @@ class SimContext:
             # Create ownership registry for all arms + entities
             from mj_manipulator.ownership import OwnershipRegistry
 
-            all_names = list(self._arms.keys()) + list(self._entities.keys())
+            all_names = list(self._arm_group.arms.keys()) + list(self._entities.keys())
             self._ownership = OwnershipRegistry(all_names)
 
         self.sync()
@@ -369,7 +370,7 @@ class SimContext:
         more common case where no grasp is active.
         """
         holding_verifiers = []
-        for arm in self._arms.values():
+        for arm in self._arm_group.arms.values():
             gripper = arm.gripper
             if gripper is None or gripper.grasp_verifier is None:
                 continue
@@ -737,7 +738,7 @@ class SimContext:
 
         # 3. Release all grasps: clear grasp manager bookkeeping, detach
         #    kinematic welds, and reset grasp verifiers to IDLE.
-        for arm in self._arms.values():
+        for arm in self._arm_group.arms.values():
             arm_name = arm.config.name
             gm = arm.grasp_manager
             if gm is not None:
@@ -798,12 +799,12 @@ class SimContext:
         Returns:
             SimArmController for the specified arm.
         """
-        if name not in self._arms:
+        if name not in self._arm_group.arms:
             raise ValueError(f"Unknown arm: {name}")
 
         if name not in self._arm_controllers:
             self._arm_controllers[name] = SimArmController(
-                self._arms[name],
+                self._arm_group.arms[name],
                 self,
             )
         return self._arm_controllers[name]
@@ -904,7 +905,7 @@ class SimContext:
         self._controller = PhysicsController(
             self._model,
             self._data,
-            self._arms,
+            self._arm_group,
             config=exec_config,
             gripper_config=gripper_config,
             viewer=self._viewer,
@@ -914,7 +915,7 @@ class SimContext:
             abort_fn=self._abort_fn,
         )
 
-        for name in self._arms:
+        for name in self._arm_group.arms:
             self._executors[name] = self._controller.get_executor(name)
 
         for name in self._entities:
@@ -935,8 +936,8 @@ class SimContext:
         self._controller = KinematicController(
             self._model,
             self._data,
-            self._arms,
-            config=exec_config
+            self._arm_group,
+            config=exec_config,
             viewer=self._viewer,
             viewer_sync_interval=viewer_sync_interval,
             initial_positions=self._initial_positions,
@@ -945,7 +946,7 @@ class SimContext:
         )
 
         # Executor wrappers for the no-event-loop legacy path
-        for name in self._arms:
+        for name in self._arm_group.arms:
             self._executors[name] = self._controller.get_executor(name)
 
         for name in self._entities:
