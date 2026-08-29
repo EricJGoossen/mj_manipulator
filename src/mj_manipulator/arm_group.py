@@ -5,6 +5,7 @@ import itertools
 import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING
+from collections.abc import Iterator, Mapping
 
 import mujoco
 import numpy as np
@@ -37,7 +38,7 @@ class ContextRobotModel:
         data: mujoco.MjData,
         joint_qpos_indices: list[int],
         ee_site_id_group: list[int],
-        joint_limits: tuple[np.ndarray, np.ndarray],
+        joint_limits: tuple[np.ndarray, np.ndarray],    
         tcp_offset_group: list[np.ndarray] | None = None,
     ):
         self._model = model
@@ -91,12 +92,16 @@ def _read_site_pose(
 # Arm group
 # =============================================================================
 
-class ArmGroup:
+class ArmGroup(Mapping):
     arms: dict[str, Arm]
     dof: int
     config: ArmGroupConfig
     env: Environment
     grasp_manager: GraspManager | None
+
+    # -----------------------------------------------------------------
+    # Initialization
+    # -----------------------------------------------------------------
 
     def __init__(
         self,
@@ -124,6 +129,19 @@ class ArmGroup:
         return q_by_arm
 
     # -----------------------------------------------------------------
+    # Mapping interface
+    # -----------------------------------------------------------------
+
+    def __getitem__(self, name: str) -> Arm:
+        return self.arms[name]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.arms)
+
+    def __len__(self) -> int:
+        return len(self.arms)
+
+    # -----------------------------------------------------------------
     # State queries
     # -----------------------------------------------------------------
 
@@ -131,7 +149,7 @@ class ArmGroup:
         """Get an Arm by name."""
         if name not in self.arms:
             raise ValueError(f"Arm '{name}' not found in this group")
-        return self.arms[name]
+        return self[name]
 
     @property
     def joint_names(self) -> list[str]:

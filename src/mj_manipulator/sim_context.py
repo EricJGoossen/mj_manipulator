@@ -325,7 +325,7 @@ class SimContext:
             self._setup_kinematic(viewer_sync_interval)
 
         # Mark F/T sensors as valid in physics mode (always valid on hardware)
-        for arm in self._arm_group.arms.values():
+        for arm in self._arm_group.values():
             arm.ft_valid = self._physics
 
         # Wire event loop to controller (both physics and kinematic modes)
@@ -335,7 +335,7 @@ class SimContext:
             # Create ownership registry for all arms + entities
             from mj_manipulator.ownership import OwnershipRegistry
 
-            all_names = list(self._arm_group.arms.keys()) + list(self._entities.keys())
+            all_names = list(self._arm_group.keys()) + list(self._entities.keys())
             self._ownership = OwnershipRegistry(all_names)
 
         self.sync()
@@ -799,12 +799,12 @@ class SimContext:
         Returns:
             SimArmController for the specified arm.
         """
-        if name not in self._arm_group.arms:
+        if name not in self._arm_group:
             raise ValueError(f"Unknown arm: {name}")
 
         if name not in self._arm_controllers:
             self._arm_controllers[name] = SimArmController(
-                self._arm_group.arms[name],
+                self._arm_group[name],
                 self,
             )
         return self._arm_controllers[name]
@@ -915,7 +915,7 @@ class SimContext:
             abort_fn=self._abort_fn,
         )
 
-        for name in self._arm_group.arms:
+        for name in self._arm_group:
             self._executors[name] = self._controller.get_executor(name)
 
         for name in self._entities:

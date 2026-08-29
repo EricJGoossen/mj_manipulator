@@ -75,7 +75,7 @@ class KinematicController(Controller):
         super().__init__(
             model,
             data,
-            arm_group.arms,
+            arm_group,
             config=config,
             gripper_config=None,
             viewer=viewer,

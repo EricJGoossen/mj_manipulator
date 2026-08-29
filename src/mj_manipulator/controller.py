@@ -322,7 +322,7 @@ class Controller(ABC):
         self._arms: dict[str, _ArmState] = {}
         self._grippers: dict[str, _GripperState] = {}
 
-        for name, arm in arm_group.arms.items():
+        for name, arm in arm_group.items():
             if initial_positions and name in initial_positions:
                 target_pos = np.asarray(initial_positions[name]).copy()
             else:

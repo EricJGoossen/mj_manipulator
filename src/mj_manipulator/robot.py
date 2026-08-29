@@ -125,7 +125,7 @@ class RobotBase:
         # can set ``arm.gripper.grasp_verifier`` before or after super().__init__.
         from mj_manipulator.grasp_verifier import GraspVerifier
 
-        for arm in self.arm_group.arms.values():
+        for arm in self.arm_group.values():
             gripper = arm.gripper
             if gripper is not None and gripper.grasp_verifier is None:
                 gripper.grasp_verifier = GraspVerifier(gripper=gripper, signals=[])
@@ -150,8 +150,8 @@ class RobotBase:
 
     def __getitem__(self, arm_name: str) -> _ArmScope:
         """Get a per-arm accessor: robot["franka"].get_ee_pose()"""
-        if arm_name not in self.arm_group.arms:
-            raise KeyError(f"Unknown arm: {arm_name}. Available: {list(self.arm_group.arms.keys())}")
+        if arm_name not in self.arm_group:
+            raise KeyError(f"Unknown arm: {arm_name}. Available: {list(self.arm_group.keys())}")
         return _ArmScope(self, arm_name)
 
     # -- Execution context -----------------------------------------------------
@@ -261,7 +261,7 @@ class RobotBase:
 
         # 2. Move arms to "ready" if defined.
         ready = self.named_poses.get("ready", {})
-        for arm_name, arm in self.arm_group.arms.items():
+        for arm_name, arm in self.arm_group.items():
             if arm_name in ready:
                 q = ready[arm_name]
                 for i, idx in enumerate(arm.joint_qpos_indices):
