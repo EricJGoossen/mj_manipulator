@@ -98,6 +98,48 @@ class Trajectory:
 
         return pos, vel, acc
 
+    def split_trajectory(self, arm_group) -> dict[str, "Trajectory"]:
+        """Split a trajectory into per-arm trajectories.
+
+        Args:
+            arm_group: The ArmGroup containing the arms to split for.
+
+        Returns:
+            A dictionary mapping arm names to their corresponding Trajectory.
+        """
+        if self.positions.shape[1] != sum(arm.dof for arm in arm_group.arms.values()):
+            raise ValueError(
+                f"Trajectory DOF {self.positions.shape[1]} doesn't match total DOF of arm group {sum(arm.dof for arm in arm_group.arms.values())}"
+            )
+
+        per_arm_trajectories = {}
+        total_dof = 0
+        for arm_name in arm_group.keys():
+            arm_dof = arm_group[arm_name].dof
+            total_dof += arm_dof
+
+            # Check all names in trajectory_names are in arm_group.arms[arm_name].joint_names
+            trajectory_names = None
+            if self.joint_names is not None:
+                trajectory_names = self.joint_names[total_dof - arm_dof:total_dof]
+
+                if trajectory_names != list(arm_group[arm_name].config.joint_names):
+                    raise ValueError(
+                        f"Joint names for arm '{arm_name}' don't match: "
+                        f"trajectory slice has {trajectory_names}, arm expects "
+                        f"{list(arm_group[arm_name].config.joint_names)}"
+                    )
+
+            per_arm_trajectories[arm_name] = Trajectory(
+                timestamps=self.timestamps,
+                positions=self.positions[:, total_dof - arm_dof:total_dof],
+                velocities=self.velocities[:, total_dof - arm_dof:total_dof],
+                accelerations=self.accelerations[:, total_dof - arm_dof:total_dof],
+                entity=arm_name,
+                joint_names=trajectory_names,
+            )
+        return per_arm_trajectories
+
     @classmethod
     def from_path(
         cls,

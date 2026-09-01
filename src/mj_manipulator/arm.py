@@ -62,7 +62,7 @@ class ArmRobotModel:
 # =============================================================================
 
 
-def _read_site_pose(
+def read_site_pose(
     data: mujoco.MjData,
     site_id: int,
     tcp_offset: np.ndarray | None = None,
@@ -441,7 +441,7 @@ class Arm:
         if self.ee_site_id == -1:
             raise RuntimeError("No ee_site configured")
         mujoco.mj_forward(self.env.model, self.env.data)
-        return _read_site_pose(self.env.data, self.ee_site_id, self.config.tcp_offset)
+        return read_site_pose(self.env.data, self.ee_site_id, self.config.tcp_offset)
 
     def get_ee_jacobian(self) -> np.ndarray:
         """6xN end-effector Jacobian in world frame.
@@ -498,4 +498,4 @@ class Arm:
         for i, idx in enumerate(self.joint_qpos_indices):
             tmp_data.qpos[idx] = q[i]
         mujoco.mj_forward(self.env.model, tmp_data)
-        return _read_site_pose(tmp_data, self.ee_site_id, self.config.tcp_offset)
+        return read_site_pose(tmp_data, self.ee_site_id, self.config.tcp_offset)

@@ -68,12 +68,18 @@ class ArmGroupConfig(EntityConfig):
     """
     planning_defaults: PlanningDefaults = field(default_factory=PlanningDefaults)
 
-    max_bimanual_IK_solutions: int = 20
     """Maximum number of IK solutions to return for a bimanual pose."""
+    max_bimanual_IK_solutions: int = 20
+
+    """ Default execution parameters for all arms in this group. Can be overridden per-arm. """
+    execution_defaults: ExecutionConfig | None = None
+
 
     def __post_init__(self):
         """Set entity_type to arm_group."""
         object.__setattr__(self, "entity_type", "arm_group")
+        if self.execution_defaults is None:
+            object.__setattr__(self, "execution_defaults", ExecutionConfig())
 
 @dataclass
 class ArmConfig(EntityConfig):
@@ -98,6 +104,7 @@ class ArmConfig(EntityConfig):
     ft_torque_sensor: str | None = None  # MuJoCo torque sensor name (3-axis)
     extra_arm_body_names: list[str] | None = None  # Additional bodies to treat as part of arm for collision
     planning_defaults: PlanningDefaults = field(default_factory=PlanningDefaults)
+    max_ik_solutions: int = 10 # Maximum number of IK solutions to return for a given pose.
 
     # Cartesian control limits — the arm declares what it can do.
     # TeleopController and servo primitives read these.

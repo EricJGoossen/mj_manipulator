@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import mujoco
+import numpy as np
 
 from mj_manipulator.contacts import iter_contacts
 
@@ -192,6 +193,38 @@ class _BaseGripper:
     def kinematic_open(self) -> None:
         """Open gripper kinematically."""
         self._apply_kinematic_position(0.0)
+
+    def get_actual_position(self) -> float:
+        """Get actual gripper position (0.0=open, 1.0=closed).
+
+        Must be implemented by subclasses.
+        """
+        raise NotImplementedError
+
+    # -- Width (percent-open) control -----------------------------------------
+
+    def get_width(self) -> float:
+        """Get the current gripper width as a fraction open.
+
+        Ranges from 0.0 (fully closed) to 1.0 (fully open) -- the inverse
+        of :meth:`get_actual_position`.
+        """
+        return 1.0 - self.get_actual_position()
+
+    def set_width(self, width: float, synchronous: bool = True) -> bool:
+        """Set the gripper width as a fraction open.
+
+        Args:
+            width: Desired width, clamped to [0.0, 1.0] where 1.0 is fully
+                open and 0.0 is fully closed.
+            synchronous: Unused here -- kinematic motion is always instant,
+                with no elapsed time to block on. Real hardware grippers
+                (see HardwareArmController in mj_manipulator_ros) block
+                until the physical motion completes when True.
+        """
+        t = 1.0 - float(np.clip(width, 0.0, 1.0))
+        self._apply_kinematic_position(t)
+        return True
 
     # -- Shared helpers -----------------------------------------------------
 
