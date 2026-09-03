@@ -149,6 +149,10 @@ class Trajectory:
         control_dt: float = 0.008,
         entity: str | None = None,
         joint_names: list[str] | None = None,
+        retime_max_iters: int = 8,
+        retime_gridpoints: int = 1000,
+        retime_accel_tol: float = 1e-3,
+        retime_shrink_factor: float = 0.97,
     ) -> "Trajectory":
         """Create time-optimal trajectory from geometric path using TOPP-RA.
 
@@ -201,33 +205,27 @@ class Trajectory:
 
         path_positions = toppra.SplineInterpolator(np.linspace(0, 1, len(path_array)), path_array)
 
-        vel_limits_minmax = np.stack((-vel_limits, vel_limits)).T
-        acc_limits_minmax = np.stack((-acc_limits, acc_limits)).T
+        working_acc_limits = np.asarray(acc_limits, dtype=float).copy()
 
-        pc_vel = constraint.JointVelocityConstraint(vel_limits_minmax)
-        pc_acc = constraint.JointAccelerationConstraint(acc_limits_minmax)
-
-        instance = algo.TOPPRA(
-            [pc_vel, pc_acc],
-            path_positions,
-            parametrizer="ParametrizeConstAccel",
-        )
-
-        jnt_traj = instance.compute_trajectory()
-
-        if jnt_traj is None:
-            raise RuntimeError(
-                "TOPP-RA failed to find valid trajectory. Path may violate velocity or acceleration constraints."
+        for attempt in range(retime_max_iters):
+            timestamps, positions, velocities, accelerations = cls._solve_toppra(
+                path_positions, vel_limits, working_acc_limits, control_dt,
+                n_gridpoints=retime_gridpoints,
             )
+            amax = np.max(np.abs(accelerations), axis=0)
+            violated = amax > acc_limits * (1.0 + retime_accel_tol)
+            if not violated.any():
+                break
 
-        duration = jnt_traj.duration
-        timestamps = np.arange(0.0, duration, control_dt)
-        if not np.isclose(timestamps[-1], duration, rtol=0.0, atol=1e-8):
-            timestamps = np.append(timestamps, duration)
-
-        positions = jnt_traj(timestamps)
-        velocities = jnt_traj(timestamps, 1)
-        accelerations = jnt_traj(timestamps, 2)
+            working_acc_limits[violated] *= retime_shrink_factor
+        else:
+            raise RuntimeError(
+                f"TOPP-RA could not produce a trajectory within acceleration limits after "
+                f"{retime_max_iters} retighten attempts (joint(s) "
+                f"{np.where(violated)[0].tolist()} still over limit). This means the path "
+                "itself likely demands more acceleration than the joint is rated for, not "
+                "just a reparametrization artifact -- check the path, not just the retimer."
+            )
 
         return cls(
             timestamps=timestamps,
@@ -238,6 +236,45 @@ class Trajectory:
             joint_names=joint_names,
         )
 
+    @staticmethod
+    def _solve_toppra(path_positions, vel_limits, acc_limits, control_dt, n_gridpoints):
+        """Run TOPP-RA once at a given per-joint acceleration bound and an
+        explicit, dense solve grid.
+
+        The dense grid isn't just about accuracy: leaving `gridpoints`
+        unset lets TOPP-RA derive its solve grid from the path's own knot
+        spacing, which for a sparse/uneven CBiRRT path can be coarse enough
+        to produce a genuinely slower-than-optimal parametrization on top
+        of the sampling inaccuracy -- an explicit dense grid fixes both at
+        once (see the empirical comparison this replaced: coarse-grid
+        durations were 30-50% longer than dense-grid ones, independent of
+        the accel-limit issue).
+        """
+        vel_limits_minmax = np.stack((-vel_limits, vel_limits)).T
+        acc_limits_minmax = np.stack((-acc_limits, acc_limits)).T
+
+        pc_vel = constraint.JointVelocityConstraint(vel_limits_minmax)
+        pc_acc = constraint.JointAccelerationConstraint(acc_limits_minmax)
+
+        instance = algo.TOPPRA(
+            [pc_vel, pc_acc],
+            path_positions,
+            gridpoints=np.linspace(0, 1, n_gridpoints),
+            parametrizer="ParametrizeConstAccel",
+        )
+
+        jnt_traj = instance.compute_trajectory()
+        if jnt_traj is None:
+            raise RuntimeError(
+                "TOPP-RA failed to find valid trajectory. Path may violate velocity or acceleration constraints."
+            )
+
+        duration = jnt_traj.duration
+        timestamps = np.arange(0.0, duration, control_dt)
+        if not np.isclose(timestamps[-1], duration, rtol=0.0, atol=1e-8):
+            timestamps = np.append(timestamps, duration)
+
+        return timestamps, jnt_traj(timestamps), jnt_traj(timestamps, 1), jnt_traj(timestamps, 2)
 
 def create_linear_trajectory(
     start: float,

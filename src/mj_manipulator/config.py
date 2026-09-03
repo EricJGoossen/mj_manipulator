@@ -35,7 +35,7 @@ class PlanningDefaults:
 
     timeout: float = 30.0
     max_iterations: int = 5000
-    step_size: float = 0.1
+    step_size: float = 0.05
     goal_bias: float = 0.1
     smoothing_iterations: int = 100
 
@@ -144,6 +144,10 @@ class ExecutionConfig:
     velocity_tolerance: float = 0.1  # rad/s
     convergence_timeout_steps: int = 500
     base_settling_steps: int = 50
+    retime_gridpoints: int = 1000 # Number of points to sample for retiming
+    retime_max_iters: int = 8 # Maximum number of retiming iterations before giving up
+    retime_shrink_factor: float = 0.97 # Factor to shrink acceleration limits by on each retiming iteration
+    retime_accel_tol: float = 1e-3  # Tolerance for acceleration overshoot during retiming
 
     @classmethod
     def tight(cls) -> "ExecutionConfig":

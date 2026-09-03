@@ -484,6 +484,10 @@ class ArmGroup(Mapping):
             control_dt=control_dt,
             entity=self.config.name,
             joint_names=self.joint_names,
+            retime_max_iters=self.config.execution_defaults.retime_max_iters,
+            retime_gridpoints=self.config.execution_defaults.retime_gridpoints,
+            retime_accel_tol=self.config.execution_defaults.retime_accel_tol,
+            retime_shrink_factor=self.config.execution_defaults.retime_shrink_factor,
         )
 
     def plan_cartesian_path(
