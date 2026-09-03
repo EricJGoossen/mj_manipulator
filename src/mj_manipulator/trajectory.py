@@ -153,8 +153,21 @@ class Trajectory:
         retime_gridpoints: int = 1000,
         retime_accel_tol: float = 1e-3,
         retime_shrink_factor: float = 0.97,
+        collision_checker=None,
+        collision_max_densify: int = 4,
     ) -> "Trajectory":
         """Create time-optimal trajectory from geometric path using TOPP-RA.
+
+        The input `path` is only guaranteed collision-free at the straight-line
+        edges the planner checked -- retiming fits a smooth cubic spline
+        (`toppra.SplineInterpolator`) through those waypoints, and that spline
+        can bow outward between waypoints (e.g. around a corner near an
+        obstacle) into space the planner never validated. If `collision_checker`
+        is given, every sampled position of the retimed trajectory is checked
+        against it; on a collision, the path is densified (a midpoint is
+        inserted between every consecutive pair of waypoints, halving the
+        spline's freedom to deviate from the checked straight lines) and
+        retiming is retried, up to `collision_max_densify` times.
 
         Args:
             path: List of waypoint configurations (joint angles in radians)
@@ -163,13 +176,21 @@ class Trajectory:
             control_dt: Control timestep in seconds (default: 125 Hz)
             entity: Entity name for hardware deployment
             joint_names: MuJoCo joint names for validation
+            collision_checker: Optional object with `.get_contacts(q)` (the
+                mj_manipulator CollisionChecker protocol). When given, the
+                retimed trajectory is validated and re-densified on collision
+                instead of being returned as-is.
+            collision_max_densify: Maximum number of densify-and-retry rounds
+                when `collision_checker` is given.
 
         Returns:
             Trajectory with time-optimal parameterization respecting limits
 
         Raises:
             ValueError: If path is empty or has inconsistent dimensions
-            RuntimeError: If TOPP-RA fails to find a valid parameterization
+            RuntimeError: If TOPP-RA fails to find a valid parameterization, or
+                if `collision_checker` still reports a collision after
+                `collision_max_densify` densify rounds
         """
         if not path:
             raise ValueError("Path cannot be empty")
@@ -203,29 +224,56 @@ class Trajectory:
                 joint_names=joint_names,
             )
 
-        path_positions = toppra.SplineInterpolator(np.linspace(0, 1, len(path_array)), path_array)
+        for densify_attempt in range(collision_max_densify + 1):
+            path_positions = toppra.SplineInterpolator(np.linspace(0, 1, len(path_array)), path_array)
 
-        working_acc_limits = np.asarray(acc_limits, dtype=float).copy()
+            # The solve grid must stay dense relative to the knot count (see
+            # _solve_toppra's docstring) -- a fixed retime_gridpoints becomes
+            # too coarse once densify has multiplied the knot count, and
+            # produces spurious, unconverging acceleration violations below.
+            n_gridpoints = max(retime_gridpoints, 10 * len(path_array))
 
-        for attempt in range(retime_max_iters):
-            timestamps, positions, velocities, accelerations = cls._solve_toppra(
-                path_positions, vel_limits, working_acc_limits, control_dt,
-                n_gridpoints=retime_gridpoints,
-            )
-            amax = np.max(np.abs(accelerations), axis=0)
-            violated = amax > acc_limits * (1.0 + retime_accel_tol)
-            if not violated.any():
+            working_acc_limits = np.asarray(acc_limits, dtype=float).copy()
+
+            for attempt in range(retime_max_iters):
+                timestamps, positions, velocities, accelerations = cls._solve_toppra(
+                    path_positions, vel_limits, working_acc_limits, control_dt,
+                    n_gridpoints=n_gridpoints,
+                )
+                amax = np.max(np.abs(accelerations), axis=0)
+                violated = amax > acc_limits * (1.0 + retime_accel_tol)
+                if not violated.any():
+                    break
+
+                working_acc_limits[violated] *= retime_shrink_factor
+            else:
+                raise RuntimeError(
+                    f"TOPP-RA could not produce a trajectory within acceleration limits after "
+                    f"{retime_max_iters} retighten attempts (joint(s) "
+                    f"{np.where(violated)[0].tolist()} still over limit). This means the path "
+                    "itself likely demands more acceleration than the joint is rated for, not "
+                    "just a reparametrization artifact -- check the path, not just the retimer."
+                )
+
+            if collision_checker is None:
                 break
 
-            working_acc_limits[violated] *= retime_shrink_factor
-        else:
-            raise RuntimeError(
-                f"TOPP-RA could not produce a trajectory within acceleration limits after "
-                f"{retime_max_iters} retighten attempts (joint(s) "
-                f"{np.where(violated)[0].tolist()} still over limit). This means the path "
-                "itself likely demands more acceleration than the joint is rated for, not "
-                "just a reparametrization artifact -- check the path, not just the retimer."
-            )
+            collision = cls._first_collision(collision_checker, positions)
+            if collision is None:
+                break
+
+            if densify_attempt == collision_max_densify:
+                idx, contacts = collision
+                raise RuntimeError(
+                    f"TOPP-RA retiming produced a trajectory that collides at waypoint "
+                    f"{idx}/{len(positions)} ({contacts}) even after densifying the input "
+                    f"path from {len(path)} to {len(path_array)} waypoints. The geometric "
+                    "path itself was collision-free at the checked resolution, so the spline "
+                    "fit through it is bowing into the obstacle between waypoints -- consider "
+                    "a smaller planner step_size or a collision safety margin."
+                )
+
+            path_array = cls._densify_path(path_array)
 
         return cls(
             timestamps=timestamps,
@@ -235,6 +283,29 @@ class Trajectory:
             entity=entity,
             joint_names=joint_names,
         )
+
+    @staticmethod
+    def _densify_path(path_array: np.ndarray) -> np.ndarray:
+        """Insert a midpoint between every consecutive waypoint pair.
+
+        Halves the spacing the spline fit has to bridge, which shrinks how
+        far a cubic spline through the path can bow away from the original
+        (collision-checked) straight-line segments.
+        """
+        midpoints = (path_array[:-1] + path_array[1:]) / 2.0
+        densified = np.empty((2 * len(path_array) - 1, path_array.shape[1]), dtype=path_array.dtype)
+        densified[0::2] = path_array
+        densified[1::2] = midpoints
+        return densified
+
+    @staticmethod
+    def _first_collision(collision_checker, positions: np.ndarray):
+        """Return (index, contacts) for the first colliding sample, or None."""
+        for i, q in enumerate(positions):
+            contacts = collision_checker.get_contacts(q)
+            if contacts:
+                return i, contacts
+        return None
 
     @staticmethod
     def _solve_toppra(path_positions, vel_limits, acc_limits, control_dt, n_gridpoints):

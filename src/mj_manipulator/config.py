@@ -35,7 +35,7 @@ class PlanningDefaults:
 
     timeout: float = 30.0
     max_iterations: int = 5000
-    step_size: float = 0.05
+    step_size: float = 0.1
     goal_bias: float = 0.1
     smoothing_iterations: int = 100
 
@@ -148,6 +148,7 @@ class ExecutionConfig:
     retime_max_iters: int = 8 # Maximum number of retiming iterations before giving up
     retime_shrink_factor: float = 0.97 # Factor to shrink acceleration limits by on each retiming iteration
     retime_accel_tol: float = 1e-3  # Tolerance for acceleration overshoot during retiming
+    retime_collision_max_densify: int = 4  # Max path-densify retries when the retimed spline collides
 
     @classmethod
     def tight(cls) -> "ExecutionConfig":

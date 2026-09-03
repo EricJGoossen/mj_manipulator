@@ -377,9 +377,24 @@ class ArmGroup(Mapping):
             tcp_offset_group=self.tcp_offset_group,
         )
 
-        # Collision checker with snapshot of current grasp state.
-        # Only include objects grasped by THIS arm — objects held by other
-        # arms are static obstacles, not part of this arm's robot model.
+        collision_checker = self._make_collision_checker(model, data)
+
+        ik = list(self.arms.values())[0].ik_solver if len(self.arms) >= 1 else None
+        return CBiRRT(
+            robot=robot_model,
+            ik_solver=ik if ik is not None else _NoIKSolver(),
+            collision_checker=collision_checker,
+            config=config,
+        )
+
+    def _make_collision_checker(self, model, data) -> CollisionChecker:
+        """Build a collision checker with a snapshot of the current grasp state.
+
+        Only include objects grasped by THIS arm — objects held by other
+        arms are static obstacles, not part of this arm's robot model.
+        Shared by create_planner() and retime() so both validate against
+        the same grasp/attachment state.
+        """
         extra_bodies = self.extra_arm_body_names
         if self.grasp_manager is not None:
             grasped_objects = frozenset(
@@ -388,7 +403,7 @@ class ArmGroup(Mapping):
             attachments = {
                 obj: att for obj, att in self.grasp_manager._attachments.items() if obj in dict(grasped_objects)
             }
-            collision_checker = CollisionChecker(
+            return CollisionChecker(
                 model=model,
                 data=data,
                 joint_names=self.joint_names,
@@ -396,20 +411,11 @@ class ArmGroup(Mapping):
                 attachments=attachments,
                 extra_arm_body_names=extra_bodies,
             )
-        else:
-            collision_checker = CollisionChecker(
-                model=model,
-                data=data,
-                joint_names=self.joint_names,
-                extra_arm_body_names=extra_bodies,
-            )
-
-        ik = list(self.arms.values())[0].ik_solver if len(self.arms) >= 1 else None
-        return CBiRRT(
-            robot=robot_model,
-            ik_solver=ik if ik is not None else _NoIKSolver(),
-            collision_checker=collision_checker,
-            config=config,
+        return CollisionChecker(
+            model=model,
+            data=data,
+            joint_names=self.joint_names,
+            extra_arm_body_names=extra_bodies,
         )
 
     def _make_planner_config(
@@ -466,17 +472,32 @@ class ArmGroup(Mapping):
         Converts a geometric path (from any plan_to_* method) into a
         time-optimal trajectory respecting the arm's kinematic limits.
 
+        The path is only guaranteed collision-free at the straight-line
+        edges the planner checked; TOPP-RA fits a smooth spline through it,
+        which can bow into an obstacle between waypoints even though the
+        path itself was clear. Every sampled position of the retimed
+        trajectory is validated against a fresh collision checker (forked
+        from the live env, current grasp state included) and, on a
+        collision, the path is re-densified and retried -- see
+        `Trajectory.from_path`.
+
         Args:
             path: List of waypoint configurations from a planner.
             control_dt: Control timestep for trajectory sampling (default 125 Hz).
 
         Returns:
             Time-optimal Trajectory with positions, velocities, and accelerations.
+
+        Raises:
+            RuntimeError: The retimed trajectory still collides after
+                exhausting the densify-and-retry budget.
         """
         if control_dt is None:
             control_dt = self.config.execution_defaults.control_dt
 
         limits = self.kinematic_limits
+        planning_env = self.env.fork()
+        collision_checker = self._make_collision_checker(planning_env.model, planning_env.data)
         return Trajectory.from_path(
             path=path,
             vel_limits=limits.velocity,
@@ -488,6 +509,8 @@ class ArmGroup(Mapping):
             retime_gridpoints=self.config.execution_defaults.retime_gridpoints,
             retime_accel_tol=self.config.execution_defaults.retime_accel_tol,
             retime_shrink_factor=self.config.execution_defaults.retime_shrink_factor,
+            collision_checker=collision_checker,
+            collision_max_densify=self.config.execution_defaults.retime_collision_max_densify,
         )
 
     def plan_cartesian_path(
