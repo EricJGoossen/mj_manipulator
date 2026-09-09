@@ -265,7 +265,7 @@ class Trajectory:
             if densify_attempt == collision_max_densify:
                 idx, contacts = collision
                 raise RuntimeError(
-                    f"TOPP-RA retiming produced a trajectory that collides at waypoint "
+                    f"TOPP-RA retiming produced a trajectory that collides at sample "
                     f"{idx}/{len(positions)} ({contacts}) even after densifying the input "
                     f"path from {len(path)} to {len(path_array)} waypoints. The geometric "
                     "path itself was collision-free at the checked resolution, so the spline "
@@ -299,12 +299,35 @@ class Trajectory:
         return densified
 
     @staticmethod
-    def _first_collision(collision_checker, positions: np.ndarray):
-        """Return (index, contacts) for the first colliding sample, or None."""
-        for i, q in enumerate(positions):
-            contacts = collision_checker.get_contacts(q)
-            if contacts:
-                return i, contacts
+    def _first_collision(collision_checker, positions: np.ndarray, *, interp_substeps: int = 8):
+        """Return (index, contacts) for the first colliding sample, or None.
+
+        `Trajectory.sample()` linearly interpolates between consecutive
+        stored rows, so any caller resampling the trajectory at its own
+        times (a different control rate, or just a `np.linspace` over the
+        duration, as tests do) can land anywhere along a row-to-row chord --
+        not just on the rows themselves. Checking only the rows can miss a
+        graze that occurs strictly between two collision-free rows, even
+        though both endpoints are clear -- the same risk `from_path`
+        already densifies the input PATH to guard against, one level up
+        (the geometric path's straight edges vs. the fitted spline); this
+        guards the stored rows vs. their own linear interpolation.
+        `interp_substeps` sub-samples of each chord (the far endpoint
+        included) are checked to catch that.
+        """
+        if len(positions) == 0:
+            return None
+        contacts = collision_checker.get_contacts(positions[0])
+        if contacts:
+            return 0, contacts
+        for i in range(1, len(positions)):
+            prev, cur = positions[i - 1], positions[i]
+            for step in range(1, interp_substeps + 1):
+                alpha = step / interp_substeps
+                q = (1 - alpha) * prev + alpha * cur
+                contacts = collision_checker.get_contacts(q)
+                if contacts:
+                    return (i - 1) + alpha, contacts
         return None
 
     @staticmethod

@@ -274,7 +274,7 @@ class ArmGroup(Mapping):
     # Planning
     # -----------------------------------------------------------------
 
-    def check_collisions(self, arm_name: str | None = None) -> list[tuple[str, str, float]]:
+    def check_collisions(self, arm_name: str | None = None, verbose: bool = True) -> list[tuple[str, str, float]]:
         """Check current configuration for collisions.
 
         Uses the group's combined collision checker (cross-arm contacts are
@@ -287,10 +287,21 @@ class ArmGroup(Mapping):
                 entirely unrelated to this arm (e.g. the other arm hitting the
                 table) are excluded. If None (default), every contact in the
                 group is reported.
+            verbose: Print a summary line (and per-contact detail) as before.
+                Set False for tight loops that call this many times per
+                invocation (e.g. a resampling or adversarial-pair search) --
+                TODO(review): added after real-hardware bring-up, where a
+                300-attempt search calling this thousands of times flooded
+                the console with "bimanual: collision-free" noise on every
+                single interpolation step, drowning out anything useful.
+                Default stays True since the printed summary is genuinely
+                useful for the common case (an operator watching a
+                confirm_phrase-gated real motion).
 
         Returns:
             List of (body, other_body, penetration_mm) tuples, filtered to
-            `arm_name` if given. Empty if collision-free. Prints a summary.
+            `arm_name` if given. Empty if collision-free. Prints a summary
+            unless verbose=False.
 
         Example::
 
@@ -302,30 +313,41 @@ class ArmGroup(Mapping):
         if arm_name is not None and arm_name not in self.arms:
             raise ValueError(f"Arm '{arm_name}' not found in this group")
 
-        planner = self.create_planner()
-        contacts = planner.collision.get_contacts(self.get_joint_positions())
+        # Deliberately NOT create_planner(): that also builds a
+        # ContextRobotModel, looks up an IK solver, detects angular joints,
+        # and constructs a full CBiRRT -- all unused here, since this is a
+        # pure collision query. Only the env fork (for isolation) and the
+        # collision checker itself are needed. Callers that resample goals
+        # in a retry loop can call this dozens to hundreds of times per
+        # invocation (e.g. hw_validation's make_concurrent_goals(), which
+        # nests two ~20-attempt make_goal() retry loops inside its own
+        # ~20-attempt outer loop), so the per-call cost is not cosmetic.
+        planning_env = self.env.fork()
+        collision_checker = self._make_collision_checker(planning_env.model, planning_env.data)
+        contacts = collision_checker.get_contacts(self.get_joint_positions())
         label = self.config.name
 
         if arm_name is not None:
             arm = self.arms[arm_name]
-            body_ids = planner.collision.body_ids_for_joints(
+            body_ids = collision_checker.body_ids_for_joints(
                 arm.config.joint_names, arm.config.extra_arm_body_names
             )
             body_names = {
-                mujoco.mj_id2name(planner.collision.model, mujoco.mjtObj.mjOBJ_BODY, bid)
+                mujoco.mj_id2name(collision_checker.model, mujoco.mjtObj.mjOBJ_BODY, bid)
                 for bid in body_ids
             }
             contacts = [(b1, b2, d) for b1, b2, d in contacts if b1 in body_names or b2 in body_names]
             label = arm_name
 
-        if contacts:
-            print(f"{label}: {len(contacts)} contact(s)")
-            for body, other, depth in contacts:
-                body_short = body.split("/", 1)[-1] if "/" in body else body
-                other_short = other.split("/", 1)[-1] if "/" in other else other
-                print(f"  {body_short} <-> {other_short}: {depth:.1f}mm")
-        else:
-            print(f"{label}: collision-free")
+        if verbose:
+            if contacts:
+                print(f"{label}: {len(contacts)} contact(s)")
+                for body, other, depth in contacts:
+                    body_short = body.split("/", 1)[-1] if "/" in body else body
+                    other_short = other.split("/", 1)[-1] if "/" in other else other
+                    print(f"  {body_short} <-> {other_short}: {depth:.1f}mm")
+            else:
+                print(f"{label}: collision-free")
         return contacts
 
     def create_planner(
@@ -798,6 +820,15 @@ class ArmGroup(Mapping):
         q = np.asarray(q_goal, dtype=float)
         if q.shape != (arm.dof,):
             raise ValueError(f"arm '{arm.config.name}' expects {arm.dof} joints, got {tuple(q.shape)}")
+        lower, upper = arm.get_joint_limits()
+        if np.any(q < lower) or np.any(q > upper):
+            # Same "fail fast, no candidates" contract as _pose_candidates
+            # for an unreachable pose -- without this, an out-of-range
+            # configuration goal was silently passed straight to CBiRRT,
+            # which then burned its full timeout (x up to
+            # max_seed_retry_attempts retries) trying to grow a tree toward
+            # a target it could never legally reach.
+            return []
         return [q]
 
     def _pose_candidates(self, arm, pose, q_ref) -> list[np.ndarray]:

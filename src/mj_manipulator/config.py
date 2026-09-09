@@ -35,7 +35,22 @@ class PlanningDefaults:
 
     timeout: float = 30.0
     max_iterations: int = 5000
-    step_size: float = 0.1
+    # TODO(review): lowered from 0.1 -- real hardware bring-up (Stage 6,
+    # bimanual openarm) hit repeated TOPP-RA retiming failures where the
+    # geometric path CBiRRT returned was collision-free at its own (sparse)
+    # waypoints, but the spline retiming fits through those waypoints bowed
+    # into openarm_body_link0 between them. Densifying the spline (up to
+    # PlanningDefaults.retime_collision_max_densify rounds) didn't help --
+    # checking the same bad curve more finely still finds the same
+    # violation, since the curve's shape is the problem, not the sample
+    # count. A smaller step_size means less room between adjacent waypoints
+    # for the spline to deviate before retiming even starts. Affects every
+    # caller of this planner, not just Stage 6 -- plans will be somewhat
+    # slower everywhere in exchange for tighter path fidelity near
+    # obstacles. If this isn't enough on its own, a real collision margin
+    # in the retiming checker (none exists yet) would be the more correct
+    # long-term fix -- flagged for review, not implemented here.
+    step_size: float = 0.05
     goal_bias: float = 0.1
     smoothing_iterations: int = 100
 
