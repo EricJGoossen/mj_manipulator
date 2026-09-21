@@ -302,18 +302,11 @@ class Trajectory:
     def _first_collision(collision_checker, positions: np.ndarray, *, interp_substeps: int = 8):
         """Return (index, contacts) for the first colliding sample, or None.
 
-        `Trajectory.sample()` linearly interpolates between consecutive
-        stored rows, so any caller resampling the trajectory at its own
-        times (a different control rate, or just a `np.linspace` over the
-        duration, as tests do) can land anywhere along a row-to-row chord --
-        not just on the rows themselves. Checking only the rows can miss a
-        graze that occurs strictly between two collision-free rows, even
-        though both endpoints are clear -- the same risk `from_path`
-        already densifies the input PATH to guard against, one level up
-        (the geometric path's straight edges vs. the fitted spline); this
-        guards the stored rows vs. their own linear interpolation.
-        `interp_substeps` sub-samples of each chord (the far endpoint
-        included) are checked to catch that.
+        Checks `interp_substeps` sub-samples of each row-to-row chord (the
+        far endpoint included), not just the stored rows -- `sample()`
+        linearly interpolates between rows, so a caller resampling at its
+        own rate can land anywhere along that chord, and a graze strictly
+        between two clear rows would otherwise go undetected.
         """
         if len(positions) == 0:
             return None

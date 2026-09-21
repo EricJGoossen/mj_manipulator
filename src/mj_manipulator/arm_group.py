@@ -289,14 +289,7 @@ class ArmGroup(Mapping):
                 group is reported.
             verbose: Print a summary line (and per-contact detail) as before.
                 Set False for tight loops that call this many times per
-                invocation (e.g. a resampling or adversarial-pair search) --
-                TODO(review): added after real-hardware bring-up, where a
-                300-attempt search calling this thousands of times flooded
-                the console with "bimanual: collision-free" noise on every
-                single interpolation step, drowning out anything useful.
-                Default stays True since the printed summary is genuinely
-                useful for the common case (an operator watching a
-                confirm_phrase-gated real motion).
+                invocation (e.g. a resampling or adversarial-pair search).
 
         Returns:
             List of (body, other_body, penetration_mm) tuples, filtered to
@@ -313,15 +306,6 @@ class ArmGroup(Mapping):
         if arm_name is not None and arm_name not in self.arms:
             raise ValueError(f"Arm '{arm_name}' not found in this group")
 
-        # Deliberately NOT create_planner(): that also builds a
-        # ContextRobotModel, looks up an IK solver, detects angular joints,
-        # and constructs a full CBiRRT -- all unused here, since this is a
-        # pure collision query. Only the env fork (for isolation) and the
-        # collision checker itself are needed. Callers that resample goals
-        # in a retry loop can call this dozens to hundreds of times per
-        # invocation (e.g. hw_validation's make_concurrent_goals(), which
-        # nests two ~20-attempt make_goal() retry loops inside its own
-        # ~20-attempt outer loop), so the per-call cost is not cosmetic.
         planning_env = self.env.fork()
         collision_checker = self._make_collision_checker(planning_env.model, planning_env.data)
         contacts = collision_checker.get_contacts(self.get_joint_positions())
@@ -418,6 +402,7 @@ class ArmGroup(Mapping):
         the same grasp/attachment state.
         """
         extra_bodies = self.extra_arm_body_names
+        margin_mm = self.config.planning_defaults.collision_margin_mm
         if self.grasp_manager is not None:
             grasped_objects = frozenset(
                 (obj, arm) for obj, arm in self.grasp_manager.grasped.items()
@@ -432,12 +417,14 @@ class ArmGroup(Mapping):
                 grasped_objects=grasped_objects,
                 attachments=attachments,
                 extra_arm_body_names=extra_bodies,
+                margin_mm=margin_mm,
             )
         return CollisionChecker(
             model=model,
             data=data,
             joint_names=self.joint_names,
             extra_arm_body_names=extra_bodies,
+            margin_mm=margin_mm,
         )
 
     def _make_planner_config(
@@ -822,12 +809,7 @@ class ArmGroup(Mapping):
             raise ValueError(f"arm '{arm.config.name}' expects {arm.dof} joints, got {tuple(q.shape)}")
         lower, upper = arm.get_joint_limits()
         if np.any(q < lower) or np.any(q > upper):
-            # Same "fail fast, no candidates" contract as _pose_candidates
-            # for an unreachable pose -- without this, an out-of-range
-            # configuration goal was silently passed straight to CBiRRT,
-            # which then burned its full timeout (x up to
-            # max_seed_retry_attempts retries) trying to grow a tree toward
-            # a target it could never legally reach.
+            # Unreachable goal: no candidates, same contract as _pose_candidates.
             return []
         return [q]
 

@@ -14,6 +14,7 @@ CollisionChecker, SimpleCollisionChecker) into one.
 
 from __future__ import annotations
 
+import copy
 import logging
 
 import mujoco
@@ -58,6 +59,7 @@ class CollisionChecker:
         grasped_objects: frozenset[tuple[str, str]] | None = None,
         attachments: dict[str, tuple[str, np.ndarray]] | None = None,
         extra_arm_body_names: list[str] | None = None,
+        margin_mm: float = 0.0,
     ):
         """Initialize collision checker.
 
@@ -74,7 +76,22 @@ class CollisionChecker:
             extra_arm_body_names: Additional body names (and their descendants)
                 to treat as part of the arm for collision filtering. Use for
                 welded tool bodies that aren't children in the body tree.
+            margin_mm: Safety standoff. When > 0, MuJoCo starts generating
+                contacts once geoms are within this distance, not just once
+                they overlap, so get_contacts()/is_valid() flag "too close"
+                the same way they already flag "overlapping". A reported
+                depth can come out negative for one of these near-miss
+                contacts -- that's a gap in mm, not a penetration.
         """
+        if margin_mm > 0:
+            # geom_margin lives on the MjModel, which planning code treats as
+            # shared/immutable across forks -- bumping it in place would leak
+            # into every other checker using the same model. Copy once per
+            # checker instead; nq/nv/ngeom etc. are unchanged, so `data`
+            # (sized for the original model) stays valid against the copy.
+            model = copy.deepcopy(model)
+            model.geom_margin[:] = np.maximum(model.geom_margin, margin_mm / 1000.0)
+
         self.model = model
         self._grasp_manager = grasp_manager
 
