@@ -9,7 +9,4 @@ COLCON_IGNORE
 
 # Virtual environments
 .venv
-
-# Vs code settings
-c_cpp_properties.json
-settings.json
+COLCON_IGNORE
