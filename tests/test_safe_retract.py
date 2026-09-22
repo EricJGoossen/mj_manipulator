@@ -21,7 +21,79 @@ import pytest
 from mj_environment import Environment
 
 from mj_manipulator.arms.franka import FRANKA_HOME
-from mj_manipulator.safe_retract import safe_retract
+from mj_manipulator.arm_group import ArmGroup
+from mj_manipulator.config import ArmGroupConfig
+from mj_manipulator.safe_retract import safe_retract, translational_waypoints
+
+# ---------------------------------------------------------------------------
+# TestTranslationalWaypoints helper
+# ---------------------------------------------------------------------------
+
+class TestTranslationalWaypoints:
+    """Unit tests for the SE(3) waypoint generator."""
+
+    def test_basic_lift_generates_expected_count(self):
+        """15 cm lift with 5 mm spacing → 30 waypoints."""
+        start = np.eye(4)
+        wps = translational_waypoints(start, np.array([0.0, 0.0, 1.0]), distance=0.15, segment_length=0.005)
+        assert len(wps) == 30
+
+    def test_final_waypoint_at_exact_distance(self):
+        """Last waypoint is exactly at start + direction * distance."""
+        start = np.eye(4)
+        wps = translational_waypoints(start, np.array([0.0, 0.0, 1.0]), distance=0.15, segment_length=0.005)
+        np.testing.assert_allclose(wps[-1][:3, 3], [0.0, 0.0, 0.15], atol=1e-12)
+
+    def test_waypoints_preserve_orientation(self):
+        """Every waypoint has the same rotation as the start pose."""
+        start = np.eye(4)
+        # 45° rotation about Y
+        theta = np.pi / 4
+        start[:3, :3] = np.array(
+            [
+                [np.cos(theta), 0, np.sin(theta)],
+                [0, 1, 0],
+                [-np.sin(theta), 0, np.cos(theta)],
+            ]
+        )
+        wps = translational_waypoints(start, np.array([0.0, 0.0, 1.0]), distance=0.1, segment_length=0.01)
+        for w in wps:
+            np.testing.assert_allclose(w[:3, :3], start[:3, :3], atol=1e-12)
+
+    def test_non_unit_direction_is_normalized(self):
+        """Passing a non-unit direction vector still produces correct geometry."""
+        start = np.eye(4)
+        # Direction magnitude = 2, but distance is still 0.15 m
+        wps = translational_waypoints(start, np.array([0.0, 0.0, 2.0]), distance=0.15, segment_length=0.005)
+        np.testing.assert_allclose(wps[-1][:3, 3], [0.0, 0.0, 0.15], atol=1e-12)
+
+    def test_arbitrary_direction(self):
+        """Diagonal direction places the final waypoint at the right spot."""
+        start = np.eye(4)
+        direction = np.array([1.0, 1.0, 1.0])  # unit = 1/sqrt(3) * [1,1,1]
+        wps = translational_waypoints(start, direction, distance=0.3, segment_length=0.05)
+        expected = (direction / np.linalg.norm(direction)) * 0.3
+        np.testing.assert_allclose(wps[-1][:3, 3], expected, atol=1e-12)
+
+    def test_short_distance_produces_one_waypoint(self):
+        """distance < segment_length → exactly one waypoint at the full distance."""
+        start = np.eye(4)
+        wps = translational_waypoints(start, np.array([0.0, 0.0, 1.0]), distance=0.002, segment_length=0.005)
+        assert len(wps) == 1
+        np.testing.assert_allclose(wps[0][:3, 3], [0.0, 0.0, 0.002], atol=1e-12)
+
+    def test_zero_direction_returns_empty(self):
+        """Zero-magnitude direction vector → empty waypoint list."""
+        start = np.eye(4)
+        wps = translational_waypoints(start, np.zeros(3), distance=0.15, segment_length=0.005)
+        assert wps == []
+
+    def test_start_pose_translation_preserved(self):
+        """Waypoints are offset from the start pose's translation, not origin."""
+        start = np.eye(4)
+        start[:3, 3] = [0.5, -0.2, 0.3]
+        wps = translational_waypoints(start, np.array([0.0, 0.0, 1.0]), distance=0.1, segment_length=0.05)
+        np.testing.assert_allclose(wps[-1][:3, 3], [0.5, -0.2, 0.4], atol=1e-12)
 
 # ---------------------------------------------------------------------------
 # Input validation — no physics needed
@@ -36,31 +108,47 @@ class TestSafeRetractValidation:
         from mj_manipulator.sim_context import SimContext
 
         arm = franka_arm_at_home
+        group = ArmGroup(
+            {arm.config.name: arm},
+            ArmGroupConfig(
+                name=arm.config.name,
+                entity_type="arm_group",
+                joint_names=arm.config.joint_names,
+            ),
+        )
         with SimContext(
             arm.env.model,
             arm.env.data,
-            {arm.config.name: arm},
+            group,
             physics=False,
             headless=True,
         ) as ctx:
             twist = np.array([0.0, 0.0, 0.1, 0.0, 0.0, 0.1])
             with pytest.raises(NotImplementedError, match="translational"):
-                safe_retract(arm, ctx, twist=twist, max_distance=0.1)
+                safe_retract(group, ctx, twist=twist, max_distance=0.1)
 
     def test_zero_twist_returns_zero(self, franka_arm_at_home):
         """A zero twist is a no-op, not an error."""
         from mj_manipulator.sim_context import SimContext
 
         arm = franka_arm_at_home
+        group = ArmGroup(
+            {arm.config.name: arm},
+            ArmGroupConfig(
+                name=arm.config.name,
+                entity_type="arm_group",
+                joint_names=arm.config.joint_names,
+            ),
+        )
         with SimContext(
             arm.env.model,
             arm.env.data,
-            {arm.config.name: arm},
+            group,
             physics=False,
             headless=True,
         ) as ctx:
             twist = np.zeros(6)
-            distance = safe_retract(arm, ctx, twist=twist, max_distance=0.1)
+            distance = safe_retract(group, ctx, twist=twist, max_distance=0.1)
             assert distance == 0.0
 
 
@@ -83,6 +171,14 @@ class TestSafeRetractReachability:
         from mj_manipulator.sim_context import SimContext
 
         arm = franka_arm_at_home
+        group = ArmGroup(
+            {arm.config.name: arm},
+            ArmGroupConfig(
+                name=arm.config.name,
+                entity_type="arm_group",
+                joint_names=arm.config.joint_names,
+            ),
+        )
         env = arm.env
 
         # Override the fixture's home with the requested config
@@ -95,7 +191,7 @@ class TestSafeRetractReachability:
         with SimContext(
             env.model,
             env.data,
-            {arm.config.name: arm},
+            group,
             physics=physics,
             headless=True,
         ) as ctx:
@@ -104,7 +200,7 @@ class TestSafeRetractReachability:
             start_rot = env.data.site_xmat[ee_id].reshape(3, 3).copy()
 
             twist = np.array([0.0, 0.0, 0.1, 0.0, 0.0, 0.0])
-            reported = safe_retract(arm, ctx, twist=twist, max_distance=distance)
+            reported = safe_retract(group, ctx, twist=twist, max_distance=distance)
 
             end_pos = env.data.site_xpos[ee_id].copy()
             end_rot = env.data.site_xmat[ee_id].reshape(3, 3).copy()
@@ -154,13 +250,18 @@ class TestSafeRetractReachability:
 # ---------------------------------------------------------------------------
 
 
-# Franka scene with a ceiling box 8 cm above the EE at home. The lift
-# should reach the ceiling after ~5 cm (ceiling at ~62 cm, EE starts at
-# ~57 cm, ~3 cm of clearance before fingertip/hand contacts the box).
+# Franka scene with a ceiling box above the arm's home configuration.
+#
+# At FRANKA_HOME the arm is in an "elbow up" pose: link5 (upper-arm
+# segment), not the hand, is the tallest point of the robot (~92 cm),
+# well above the EE site (~55 cm). A ceiling placed near the EE height
+# collides with link5 before any motion happens at all. 0.88 m clears
+# link5's home height with margin and lets the lift travel ~5.6 cm
+# before link5 contacts the underside of the box.
 _CEILING_SCENE = """
 <mujoco>
   <worldbody>
-    <body name="ceiling" pos="0.555 0 0.64">
+    <body name="ceiling" pos="0.555 0 0.88">
       <geom type="box" size="0.3 0.3 0.01" rgba="0.4 0.4 0.4 1"/>
     </body>
   </worldbody>
@@ -170,11 +271,13 @@ _CEILING_SCENE = """
 
 @pytest.fixture
 def franka_with_ceiling():
-    """Franka + a ceiling box 8 cm above the home EE pose.
+    """Franka + a ceiling box above the home configuration's tallest link.
 
-    The ceiling is thin and positioned so the Franka hand will contact it
-    after a few cm of upward lift. Used to test that safe_retract stops on
-    new contact rather than pushing through.
+    At FRANKA_HOME, link5 (not the hand) is the highest point of the arm
+    (~92 cm, vs. the EE site at ~55 cm). The ceiling is positioned so the
+    arm starts collision-free but link5 contacts the box after ~5-6 cm of
+    upward lift. Used to test that safe_retract's planning-time collision
+    check stops the trajectory before pushing through.
     """
     try:
         import mujoco
@@ -200,7 +303,7 @@ def franka_with_ceiling():
     # Add a ceiling box directly to the spec so its mesh paths resolve
     ceiling = spec.worldbody.add_body()
     ceiling.name = "ceiling"
-    ceiling.pos = [0.555, 0.0, 0.64]  # ~8 cm above FRANKA_HOME EE z=0.566
+    ceiling.pos = [0.555, 0.0, 0.88]  # clears link5 (tallest link at home, ~92 cm)
     g = ceiling.add_geom()
     g.type = mujoco.mjtGeom.mjGEOM_BOX
     g.size = [0.3, 0.3, 0.01]
@@ -220,18 +323,26 @@ class TestSafeRetractCollision:
     """Tests for the baseline-contact / new-contact abort logic."""
 
     def test_stops_on_new_contact(self, franka_with_ceiling):
-        """Lift command of 15 cm stops early when hitting a ceiling ~8 cm up.
+        """Lift command of 15 cm stops early when hitting a ceiling.
 
-        The ceiling is a thin box at z=0.64, ~8 cm above the home EE pose
-        at z=0.566. The Franka hand is longer than just the EE site, so
-        contact happens somewhere before the EE itself reaches the ceiling
-        — expect motion to halt between 1 cm and 10 cm of z travel.
+        The ceiling is a thin box at z=0.88. At FRANKA_HOME, link5 (not
+        the hand) is the tallest point of the arm (~92 cm) and is the
+        first to contact the box, after ~5-6 cm of upward lift — expect
+        motion to halt between 1 cm and 10 cm of z travel.
         """
         import mujoco
 
         from mj_manipulator.sim_context import SimContext
 
-        arm = franka_with_ceiling
+        arm = franka_with_ceiling        
+        group = ArmGroup(
+            {arm.config.name: arm},
+            ArmGroupConfig(
+                name=arm.config.name,
+                entity_type="arm_group",
+                joint_names=arm.config.joint_names,
+            ),
+        )
         env = arm.env
 
         mujoco.mj_forward(env.model, env.data)
@@ -240,12 +351,12 @@ class TestSafeRetractCollision:
         with SimContext(
             env.model,
             env.data,
-            {arm.config.name: arm},
+            group,
             physics=True,
             headless=True,
         ) as ctx:
             twist = np.array([0.0, 0.0, 0.1, 0.0, 0.0, 0.0])
-            safe_retract(arm, ctx, twist=twist, max_distance=0.15)
+            safe_retract(group, ctx, twist=twist, max_distance=0.15)
 
         end_pos = env.data.site_xpos[arm.ee_site_id].copy()
         z_travel = end_pos[2] - start_pos[2]
@@ -275,9 +386,17 @@ class TestCartesianPathSmoothness:
         """A 5mm step up shouldn't require a huge joint motion."""
         import mujoco
 
-        from mj_manipulator.cartesian_path import plan_cartesian_path, translational_waypoints
+        from mj_manipulator.safe_retract import translational_waypoints
 
         arm = franka_arm_at_home
+        group = ArmGroup(
+            {arm.config.name: arm},
+            ArmGroupConfig(
+                name=arm.config.name,
+                entity_type="arm_group",
+                joint_names=arm.config.joint_names,
+            ),
+        )
 
         # Set to home explicitly
         for i, idx in enumerate(arm.joint_qpos_indices):
@@ -289,13 +408,13 @@ class TestCartesianPathSmoothness:
 
         # Single 5mm step up
         waypoints = translational_waypoints(start_pose, np.array([0.0, 0.0, 1.0]), 0.005, segment_length=0.005)
-        trajectory = plan_cartesian_path(arm, waypoints, q_start=q_start)
+        path = group.plan_to_poses({arm.config.name: waypoints}, partial_ok=True)
+        assert path is not None, "expected a feasible path for a 5mm step from home"
 
-        # The first commanded joint position should be within a reasonable
-        # distance of q_start. A 5mm Cartesian step on a 7-DOF arm away
-        # from singularity should be ~0.05-0.15 rad per joint at most,
-        # vector norm well under 0.5 rad.
-        q_first = trajectory.positions[0]
+        # path[0] is q_start itself; the first *planned* config is path[1].
+        # A 5mm Cartesian step on a 7-DOF arm away from singularity should
+        # be ~0.05-0.15 rad per joint at most, vector norm well under 0.5 rad.
+        q_first = path[1]
         jump = float(np.linalg.norm(q_first - q_start))
         assert jump < 0.5, (
             f"First commanded config is {jump:.3f} rad from q_start; "
@@ -307,25 +426,33 @@ class TestCartesianPathSmoothness:
         """Consecutive joint configs should be within one segment's IK jump."""
         import mujoco
 
-        from mj_manipulator.cartesian_path import plan_cartesian_path, translational_waypoints
+        from mj_manipulator.safe_retract import translational_waypoints
 
         arm = franka_arm_at_home
+        group = ArmGroup(
+            {arm.config.name: arm},
+            ArmGroupConfig(
+                name=arm.config.name,
+                entity_type="arm_group",
+                joint_names=arm.config.joint_names,
+            ),
+        )
 
         for i, idx in enumerate(arm.joint_qpos_indices):
             arm.env.data.qpos[idx] = FRANKA_HOME[i]
         mujoco.mj_forward(arm.env.model, arm.env.data)
 
         start_pose = arm.get_ee_pose()
-        q_start = arm.get_joint_positions()
 
         # 10cm lift at 5mm segments → 20 waypoints
         waypoints = translational_waypoints(start_pose, np.array([0.0, 0.0, 1.0]), 0.10, segment_length=0.005)
-        trajectory = plan_cartesian_path(arm, waypoints, q_start=q_start)
+        path = group.plan_to_poses({arm.config.name: waypoints}, partial_ok=True)
+        assert path is not None, "expected a feasible path for a 10cm lift from home"
 
         # Walk through the sampled joint path and verify no step exceeds a
         # physically sensible bound. A 5mm EE step should yield ~0.1 rad
         # norm max; we allow 0.3 to leave margin for retiming resampling.
-        positions = np.asarray(trajectory.positions)
+        positions = np.asarray(path)
         for i in range(1, len(positions)):
             step = float(np.linalg.norm(positions[i] - positions[i - 1]))
             assert step < 0.3, (
@@ -344,7 +471,15 @@ class TestCartesianPathSmoothness:
         from mj_manipulator.safe_retract import safe_retract
         from mj_manipulator.sim_context import SimContext
 
-        arm = franka_arm_at_home
+        arm = franka_arm_at_home        
+        group = ArmGroup(
+            {arm.config.name: arm},
+            ArmGroupConfig(
+                name=arm.config.name,
+                entity_type="arm_group",
+                joint_names=arm.config.joint_names,
+            ),
+        )
         env = arm.env
 
         for i, idx in enumerate(arm.joint_qpos_indices):
@@ -358,12 +493,12 @@ class TestCartesianPathSmoothness:
         with SimContext(
             env.model,
             env.data,
-            {arm.config.name: arm},
+            group,
             physics=False,
             headless=True,
         ) as ctx:
             twist = np.array([0.0, 0.0, 0.1, 0.0, 0.0, 0.0])
-            safe_retract(arm, ctx, twist=twist, max_distance=0.05)
+            safe_retract(group, ctx, twist=twist, max_distance=0.05,  max_branch_jump=0.5)
 
         q_end = arm.get_joint_positions()
         total_joint_motion = float(np.linalg.norm(q_end - q_start))

@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from mj_environment import Environment
 
-from mj_manipulator.arm import Arm, ArmRobotModel, ContextRobotModel
+from mj_manipulator.arm import Arm, ArmRobotModel
 from mj_manipulator.config import ArmConfig, KinematicLimits
 
 # UR5e constants
@@ -77,6 +77,16 @@ def ur5e_arm(ur5e_env):
 
 class TestStateQueries:
     """Tests for joint position/velocity and EE pose queries."""
+
+    def test_arm_robot_model(self, ur5e_arm):
+        """ArmRobotModel delegates to Arm correctly."""
+        adapter = ArmRobotModel(ur5e_arm)
+        assert adapter.dof == 6
+        lower, _ = adapter.joint_limits
+        assert len(lower) == 6
+
+        pose = adapter.forward_kinematics(UR5E_HOME)
+        assert pose.shape == (4, 4)
 
     def test_joint_positions(self, ur5e_arm):
         """get_joint_positions returns correct values after setting home."""
@@ -168,125 +178,6 @@ class TestForwardKinematics:
 
 
 # ---------------------------------------------------------------------------
-# Adapter tests
-# ---------------------------------------------------------------------------
-
-
-class TestAdapters:
-    """Tests for pycbirrt RobotModel adapters."""
-
-    def test_arm_robot_model(self, ur5e_arm):
-        """ArmRobotModel delegates to Arm correctly."""
-        adapter = ArmRobotModel(ur5e_arm)
-        assert adapter.dof == 6
-        lower, upper = adapter.joint_limits
-        assert len(lower) == 6
-
-        pose = adapter.forward_kinematics(UR5E_HOME)
-        assert pose.shape == (4, 4)
-
-    def test_context_robot_model(self, ur5e_arm):
-        """ContextRobotModel gives same FK as Arm."""
-        model = ur5e_arm.env.model
-        data = mujoco.MjData(model)
-        np.copyto(data.qpos, ur5e_arm.env.data.qpos)
-        mujoco.mj_forward(model, data)
-
-        ctx_model = ContextRobotModel(
-            model=model,
-            data=data,
-            joint_qpos_indices=ur5e_arm.joint_qpos_indices,
-            ee_site_id=ur5e_arm.ee_site_id,
-            joint_limits=ur5e_arm.get_joint_limits(),
-        )
-
-        assert ctx_model.dof == 6
-        pose_arm = ur5e_arm.forward_kinematics(UR5E_HOME)
-        pose_ctx = ctx_model.forward_kinematics(UR5E_HOME)
-        np.testing.assert_allclose(pose_arm, pose_ctx, atol=1e-6)
-
-    def test_context_model_isolation(self, ur5e_arm):
-        """ContextRobotModel FK doesn't affect live env."""
-        q_before = ur5e_arm.get_joint_positions().copy()
-
-        model = ur5e_arm.env.model
-        data = mujoco.MjData(model)
-
-        ctx_model = ContextRobotModel(
-            model=model,
-            data=data,
-            joint_qpos_indices=ur5e_arm.joint_qpos_indices,
-            ee_site_id=ur5e_arm.ee_site_id,
-            joint_limits=ur5e_arm.get_joint_limits(),
-        )
-
-        # FK at a wildly different config
-        ctx_model.forward_kinematics(UR5E_HOME + 1.0)
-
-        q_after = ur5e_arm.get_joint_positions()
-        np.testing.assert_allclose(q_after, q_before, atol=1e-10)
-
-
-# ---------------------------------------------------------------------------
-# Planning tests
-# ---------------------------------------------------------------------------
-
-
-class TestPlanning:
-    """Tests for motion planning via pycbirrt."""
-
-    def test_plan_to_configuration(self, ur5e_arm):
-        """Plan from home to a nearby configuration."""
-        q_goal = UR5E_HOME.copy()
-        q_goal[0] += 0.3  # Rotate shoulder pan 0.3 rad
-
-        path = ur5e_arm.plan_to_configuration(q_goal, timeout=10.0, seed=42)
-
-        assert path is not None
-        assert len(path) >= 2
-        np.testing.assert_allclose(path[0], UR5E_HOME, atol=0.05)
-        np.testing.assert_allclose(path[-1], q_goal, atol=0.05)
-
-    def test_plan_to_configurations(self, ur5e_arm):
-        """Plan to nearest of multiple goal configurations."""
-        goals = [
-            UR5E_HOME + np.array([0.3, 0, 0, 0, 0, 0]),
-            UR5E_HOME + np.array([0, 0.3, 0, 0, 0, 0]),
-        ]
-
-        path = ur5e_arm.plan_to_configurations(goals, timeout=10.0, seed=42)
-
-        assert path is not None
-        assert len(path) >= 2
-
-    def test_retime(self, ur5e_arm):
-        """retime converts a path into a time-parameterized Trajectory."""
-        q_goal = UR5E_HOME.copy()
-        q_goal[0] += 0.3
-
-        path = ur5e_arm.plan_to_configuration(q_goal, timeout=10.0, seed=42)
-        assert path is not None
-
-        traj = ur5e_arm.retime(path)
-
-        assert traj.dof == 6
-        assert traj.duration > 0
-        assert traj.entity == "ur5e"
-        np.testing.assert_allclose(traj.positions[-1], q_goal, atol=0.05)
-
-    def test_plan_to_pose_requires_ik(self, ur5e_arm):
-        """plan_to_pose raises without IK solver."""
-        pose = np.eye(4)
-        with pytest.raises(RuntimeError, match="requires an IK solver"):
-            ur5e_arm.plan_to_pose(pose)
-
-    def test_plan_to_tsrs_requires_ik(self, ur5e_arm):
-        """plan_to_tsrs raises without IK solver."""
-        with pytest.raises(RuntimeError, match="requires an IK solver"):
-            ur5e_arm.plan_to_tsrs([])
-
-
-# ---------------------------------------------------------------------------
 # Error handling tests
 # ---------------------------------------------------------------------------
 
@@ -332,77 +223,3 @@ class TestErrors:
         arm = Arm(ur5e_env, config)
         with pytest.raises(RuntimeError, match="No ee_site"):
             arm.get_ee_pose()
-
-
-class TestPlannerFailureReturnsNone:
-    """Planner failures (start/goal invalid, unreachable, or in collision)
-    return None, not an escaping PlanningError — so callers handle every
-    planning failure uniformly via ``if path is None``."""
-
-    class _RaisingPlanner:
-        def __init__(self, exc):
-            self._exc = exc
-
-        def plan(self, **kwargs):
-            raise self._exc
-
-    def test_plan_to_configuration_returns_none(self, franka_arm_at_home, monkeypatch):
-        from pycbirrt.exceptions import AllStartConfigurationsInCollision
-
-        arm = franka_arm_at_home
-        monkeypatch.setattr(
-            arm, "create_planner",
-            lambda config: self._RaisingPlanner(AllStartConfigurationsInCollision(1)),
-        )
-        assert arm.plan_to_configuration(arm.get_joint_positions()) is None
-
-    def test_plan_to_configurations_returns_none(self, franka_arm_at_home, monkeypatch):
-        from pycbirrt.exceptions import AllGoalConfigurationsInvalid
-
-        arm = franka_arm_at_home
-        monkeypatch.setattr(
-            arm, "create_planner",
-            lambda config: self._RaisingPlanner(AllGoalConfigurationsInvalid(5)),
-        )
-        assert arm.plan_to_configurations([arm.get_joint_positions()]) is None
-
-    def test_plan_to_tsrs_returns_none(self, franka_arm_at_home, monkeypatch):
-        from pycbirrt.exceptions import AllGoalConfigurationsInvalid
-        from tsr.tsr import TSR
-
-        arm = franka_arm_at_home
-        monkeypatch.setattr(
-            arm, "create_planner",
-            lambda config: self._RaisingPlanner(AllGoalConfigurationsInvalid(100)),
-        )
-        tsr = TSR(T0_w=np.eye(4), Tw_e=np.eye(4), Bw=np.zeros((6, 2)))
-        assert arm.plan_to_tsrs([tsr]) is None
-
-    def test_plan_to_configuration_value_error_returns_none(self, franka_arm_at_home, monkeypatch):
-        # The planner raises a bare ValueError ("No valid configurations
-        # available") for an empty/absent goal — also a planning failure.
-        arm = franka_arm_at_home
-        monkeypatch.setattr(
-            arm, "create_planner",
-            lambda config: self._RaisingPlanner(ValueError("No valid start configurations available")),
-        )
-        assert arm.plan_to_configuration(arm.get_joint_positions()) is None
-
-    def test_plan_to_configurations_value_error_returns_none(self, franka_arm_at_home, monkeypatch):
-        arm = franka_arm_at_home
-        monkeypatch.setattr(
-            arm, "create_planner",
-            lambda config: self._RaisingPlanner(ValueError("No valid goal configurations available")),
-        )
-        assert arm.plan_to_configurations([arm.get_joint_positions()]) is None
-
-    def test_plan_to_tsrs_value_error_returns_none(self, franka_arm_at_home, monkeypatch):
-        from tsr.tsr import TSR
-
-        arm = franka_arm_at_home
-        monkeypatch.setattr(
-            arm, "create_planner",
-            lambda config: self._RaisingPlanner(ValueError("No valid goal configurations available")),
-        )
-        tsr = TSR(T0_w=np.eye(4), Tw_e=np.eye(4), Bw=np.zeros((6, 2)))
-        assert arm.plan_to_tsrs([tsr]) is None

@@ -38,6 +38,7 @@ class PlanningDefaults:
     step_size: float = 0.1
     goal_bias: float = 0.1
     smoothing_iterations: int = 100
+    collision_margin_mm: float = 5.0
 
     @classmethod
     def fast(cls) -> "PlanningDefaults":
@@ -58,6 +59,28 @@ class EntityConfig:
     entity_type: str  # Category: "arm", "base", "gripper"
     joint_names: list[str]  # MuJoCo joint names this entity controls
 
+@dataclass
+class ArmGroupConfig(EntityConfig):
+    """Configuration for a group of arms.
+
+    This is used by MultiArmController to manage multiple arms in a single
+    environment. Each arm has its own ArmConfig, but the group config
+    defines shared parameters (e.g., collision checking, planning defaults).
+    """
+    planning_defaults: PlanningDefaults = field(default_factory=PlanningDefaults)
+
+    """Maximum number of IK solutions to return for a bimanual pose."""
+    max_bimanual_IK_solutions: int = 20
+
+    """ Default execution parameters for all arms in this group. Can be overridden per-arm. """
+    execution_defaults: ExecutionConfig | None = None
+
+
+    def __post_init__(self):
+        """Set entity_type to arm_group."""
+        object.__setattr__(self, "entity_type", "arm_group")
+        if self.execution_defaults is None:
+            object.__setattr__(self, "execution_defaults", ExecutionConfig())
 
 @dataclass
 class ArmConfig(EntityConfig):
@@ -82,6 +105,7 @@ class ArmConfig(EntityConfig):
     ft_torque_sensor: str | None = None  # MuJoCo torque sensor name (3-axis)
     extra_arm_body_names: list[str] | None = None  # Additional bodies to treat as part of arm for collision
     planning_defaults: PlanningDefaults = field(default_factory=PlanningDefaults)
+    max_ik_solutions: int = 10 # Maximum number of IK solutions to return for a given pose.
 
     # Cartesian control limits — the arm declares what it can do.
     # TeleopController and servo primitives read these.
@@ -121,6 +145,11 @@ class ExecutionConfig:
     velocity_tolerance: float = 0.1  # rad/s
     convergence_timeout_steps: int = 500
     base_settling_steps: int = 50
+    retime_gridpoints: int = 1000 # Number of points to sample for retiming
+    retime_max_iters: int = 8 # Maximum number of retiming iterations before giving up
+    retime_shrink_factor: float = 0.97 # Factor to shrink acceleration limits by on each retiming iteration
+    retime_accel_tol: float = 1e-3  # Tolerance for acceleration overshoot during retiming
+    retime_collision_max_densify: int = 4  # Max path-densify retries when the retimed spline collides
 
     @classmethod
     def tight(cls) -> "ExecutionConfig":

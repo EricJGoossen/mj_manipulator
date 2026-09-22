@@ -296,6 +296,20 @@ class Gripper(Protocol):
         """Get current gripper position (0.0 = fully open, 1.0 = fully closed)."""
         ...
 
+    def get_width(self) -> float:
+        """Get current gripper width as a fraction open (0.0=closed, 1.0=open)."""
+        ...
+
+    def set_width(self, width: float, synchronous: bool = True) -> bool:
+        """Set gripper width as a fraction open (0.0=closed, 1.0=open).
+
+        Args:
+            width: Desired width, clamped to [0.0, 1.0].
+            synchronous: If True, block until the motion completes where
+                that's meaningful (real hardware); a no-op in kinematic sim.
+        """
+        ...
+
 
 @runtime_checkable
 class IKSolver(Protocol):

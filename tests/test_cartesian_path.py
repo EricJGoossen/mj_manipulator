@@ -19,7 +19,23 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from mj_manipulator.cartesian_path import plan_cartesian_path, translational_waypoints
+from mj_manipulator.arm_group import ArmGroup
+from mj_manipulator.config import ArmGroupConfig
+from mj_manipulator.safe_retract import translational_waypoints
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+def _one_arm_group(arm):
+    return ArmGroup(
+        {arm.config.name: arm},
+        ArmGroupConfig(
+            name=arm.config.name,
+            entity_type="arm_group",
+            joint_names=arm.config.joint_names,
+        ),
+    )
 
 # ---------------------------------------------------------------------------
 # translational_waypoints — pure logic, no menagerie
@@ -102,13 +118,16 @@ class TestPlanCartesianPathValidation:
     """Tests that exercise plan_cartesian_path's error-handling paths."""
 
     def test_empty_waypoints_raises(self, franka_arm_at_home):
+        group = _one_arm_group(franka_arm_at_home)
         with pytest.raises(ValueError, match="waypoints must be non-empty"):
-            plan_cartesian_path(franka_arm_at_home, [])
+            group.plan_cartesian_path({})
 
     def test_bad_shape_raises(self, franka_arm_at_home):
+        arm = franka_arm_at_home
+        group = _one_arm_group(arm)
         bad = np.zeros((3, 4))  # not 4x4
         with pytest.raises(ValueError, match=r"shape \(3, 4\)"):
-            plan_cartesian_path(franka_arm_at_home, [bad])
+            group.plan_cartesian_path({arm.config.name: [bad]})
 
     def test_no_arm_ik_solver_raises(self, franka_env_with_gravcomp):
         """Arm built without an IK solver should refuse Cartesian planning."""
@@ -116,25 +135,25 @@ class TestPlanCartesianPathValidation:
 
         env = franka_env_with_gravcomp
         arm = create_franka_arm(env, with_ik=False)
+        group = _one_arm_group(arm)
         for i, idx in enumerate(arm.joint_qpos_indices):
             env.data.qpos[idx] = FRANKA_HOME[i]
         import mujoco
 
         mujoco.mj_forward(env.model, env.data)
 
-        # One valid waypoint; should still raise because of missing solver
         wp = arm.get_ee_pose()
         wp[2, 3] += 0.05
         with pytest.raises(RuntimeError, match="requires an arm with an IK solver"):
-            plan_cartesian_path(arm, [wp])
+            group.plan_cartesian_path({arm.config.name: [wp]})
 
     def test_unreachable_pose_raises(self, franka_arm_at_home):
-        """A pose far outside the reachable workspace raises ValueError."""
-        # 5 meters above the base — way outside Franka's ~0.855 m reach.
+        arm = franka_arm_at_home
+        group = _one_arm_group(arm)
         wp = np.eye(4)
         wp[:3, 3] = [0.0, 0.0, 5.0]
         with pytest.raises(ValueError, match="no valid IK solution"):
-            plan_cartesian_path(franka_arm_at_home, [wp])
+            group.plan_cartesian_path({arm.config.name: [wp]})
 
 
 # ---------------------------------------------------------------------------
@@ -146,30 +165,27 @@ class TestPlanCartesianPathHappy:
     """Integration tests that actually plan a trajectory."""
 
     def test_lift_produces_executable_trajectory(self, franka_arm_at_home):
-        """A 10 cm +Z lift from home yields a valid, non-empty trajectory."""
         arm = franka_arm_at_home
+        group = _one_arm_group(arm)
         start = arm.get_ee_pose()
         wps = translational_waypoints(start, np.array([0.0, 0.0, 1.0]), distance=0.1, segment_length=0.005)
-        traj = plan_cartesian_path(arm, wps)
+        traj = group.plan_cartesian_path({arm.config.name: wps})
 
         assert traj.dof == 7
         assert traj.num_waypoints > 0
         assert traj.duration > 0.0
-        assert traj.entity == arm.config.name
 
     def test_trajectory_reaches_target_kinematically(self, franka_arm_at_home):
-        """Final joint config in the trajectory produces the target EE z."""
         arm = franka_arm_at_home
+        group = _one_arm_group(arm)
         start = arm.get_ee_pose()
         target_z = start[2, 3] + 0.1
         wps = translational_waypoints(start, np.array([0.0, 0.0, 1.0]), distance=0.1, segment_length=0.005)
-        traj = plan_cartesian_path(arm, wps)
+        traj = group.plan_cartesian_path({arm.config.name: wps})
 
-        # Forward-kinematics the last waypoint and check the EE z.
         final_q = traj.positions[-1]
         pose = arm.forward_kinematics(final_q)
         assert abs(pose[2, 3] - target_z) < 1e-3
-        # Translation in x/y should be tiny (straight-line lift).
         np.testing.assert_allclose(pose[:2, 3], start[:2, 3], atol=1e-3)
 
     def test_trajectory_preserves_orientation(self, franka_arm_at_home):
@@ -183,9 +199,10 @@ class TestPlanCartesianPathHappy:
         flagging this expected interpolation error.
         """
         arm = franka_arm_at_home
+        group = _one_arm_group(arm)
         start = arm.get_ee_pose()
         wps = translational_waypoints(start, np.array([0.0, 0.0, 1.0]), distance=0.1, segment_length=0.005)
-        traj = plan_cartesian_path(arm, wps)
+        traj = group.plan_cartesian_path({arm.config.name: wps})
 
         # Check first, middle, and last waypoint
         for idx in [0, traj.num_waypoints // 2, traj.num_waypoints - 1]:
@@ -203,6 +220,7 @@ class TestPlanCartesianPathHappy:
         feasible portion — not a raise, and not an empty plan.
         """
         arm = franka_arm_at_home
+        group = _one_arm_group(arm)
         start = arm.get_ee_pose()
         # 80 cm lift — Franka reach is ~85 cm, so the very top will be
         # unreachable but the first ~30 cm should plan fine.
@@ -210,10 +228,10 @@ class TestPlanCartesianPathHappy:
 
         # Without partial_ok, should raise.
         with pytest.raises(ValueError, match="no valid IK solution"):
-            plan_cartesian_path(arm, wps)
+            group.plan_cartesian_path({arm.config.name: wps})
 
         # With partial_ok, returns a non-empty partial trajectory.
-        traj = plan_cartesian_path(arm, wps, partial_ok=True)
+        traj = group.plan_cartesian_path({arm.config.name: wps}, partial_ok=True)
         assert traj.dof == 7
         assert traj.num_waypoints > 0
         assert traj.duration > 0.0
@@ -235,17 +253,19 @@ class TestPlanCartesianPathHappy:
         hide "nothing is reachable" failures.
         """
         arm = franka_arm_at_home
+        group = _one_arm_group(arm)
         # Single unreachable waypoint
         unreachable = np.eye(4)
         unreachable[:3, 3] = [0.0, 0.0, 5.0]
         with pytest.raises(ValueError, match="no valid IK solution"):
-            plan_cartesian_path(arm, [unreachable], partial_ok=True)
+            group.plan_cartesian_path({arm.config.name: [unreachable]}, partial_ok=True)
 
     def test_q_start_override(self, franka_arm_at_home):
         """Passing q_start uses it as the initial configuration, not qpos."""
         from mj_manipulator.arms.franka import FRANKA_HOME
 
         arm = franka_arm_at_home
+        group = _one_arm_group(arm)
         # Move the arm physically to a different pose, but plan from FRANKA_HOME
         import mujoco
 
@@ -256,7 +276,7 @@ class TestPlanCartesianPathHappy:
         # FK from FRANKA_HOME — not the current (perturbed) pose
         start_pose_at_home = arm.forward_kinematics(FRANKA_HOME)
         wps = translational_waypoints(start_pose_at_home, np.array([0.0, 0.0, 1.0]), 0.05, segment_length=0.005)
-        traj = plan_cartesian_path(arm, wps, q_start=FRANKA_HOME)
+        traj = group.plan_cartesian_path({arm.config.name: wps}, q_start=FRANKA_HOME)
 
         # First trajectory waypoint should be FRANKA_HOME (the retimer seeds
         # the path at q_start), not the perturbed current qpos.

@@ -37,12 +37,39 @@ import numpy as np
 
 if TYPE_CHECKING:
     from mj_manipulator.arm import Arm
+    from mj_manipulator.arm_group import ArmGroup
     from mj_manipulator.config import PhysicsConfig
     from mj_manipulator.controller import Controller
     from mj_manipulator.event_loop import PhysicsEventLoop
-    from mj_manipulator.ownership import OwnershipRegistry
+    from mj_manipulator.ownership import OwnershipRegistry, OwnerKind
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# SiblingFailureSignal
+# ---------------------------------------------------------------------------
+
+class _SiblingFailureSignal:
+    """Shared failure flag for one batch of trajectories executed together.
+
+    One instance is created per _execute_tick_driven() call and passed to
+    every trajectory's abort_fn. When any trajectory fails, mark() flips
+    the flag; every other trajectory's abort predicate sees it on its next
+    check and stops. Backed by threading.Event so mark() is safe to call
+    from multiple threads/callbacks without any extra locking, and safe
+    to call more than once if multiple siblings fail close together.
+    """
+
+    def __init__(self):
+        self._event = threading.Event()
+
+    def mark(self) -> None:
+        """Record a failure. Safe to call more than once."""
+        self._event.set()
+
+    def triggered(self) -> bool:
+        """True once any sibling has failed."""
+        return self._event.is_set()
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +96,7 @@ class SimArmController:
         self._arm = arm
         self._context = context
 
-    def grasp(self, object_name: str | None = None) -> str | None:
+    def grasp(self, object_name: str | None = None, synchronous: bool = True) -> str | None:
         """Close gripper and attempt to grasp an object.
 
         In physics mode: gradually closes the gripper with contact detection.
@@ -169,7 +196,7 @@ class SimArmController:
         arm_name = self._arm.config.name
         self._context._controller.close_gripper(arm_name, candidate_objects=candidates)
 
-    def release(self, object_name: str | None = None) -> None:
+    def release(self, object_name: str | None = None, synchronous: bool = True) -> None:
         """Open gripper and release held object(s).
 
         Args:
@@ -206,6 +233,27 @@ class SimArmController:
         self._context._controller.open_gripper(arm_name)
 
         self._context.sync()
+
+    def set_width(self, width: float, synchronous: bool = True) -> bool:
+        """Set gripper width as a fraction open (0.0=closed, 1.0=open).
+
+        Args:
+            width: Desired width, clamped to [0.0, 1.0].
+            synchronous: Ignored in sim -- kinematic gripper motion has
+                no elapsed time to block on (see HardwareArmController
+                for the real-hardware counterpart, which does block).
+        """
+        gripper = self._arm.gripper
+        if gripper is None:
+            return False
+        gripper.set_width(width)
+        self._context.sync()
+        return True
+
+    def get_width(self) -> float:
+        """Current gripper width as a fraction open, or 0.0 if no gripper."""
+        gripper = self._arm.gripper
+        return gripper.get_width() if gripper is not None else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +303,7 @@ class SimContext:
         self,
         model: mujoco.MjModel,
         data: mujoco.MjData,
-        arms: dict[str, Arm],
+        arm_group: ArmGroup,
         *,
         physics: bool = True,
         headless: bool = False,
@@ -269,7 +317,7 @@ class SimContext:
     ):
         self._model = model
         self._data = data
-        self._arms = arms
+        self._arm_group = arm_group
         self._entities = entities or {}
         self._physics = physics
         self._headless = headless
@@ -324,7 +372,7 @@ class SimContext:
             self._setup_kinematic(viewer_sync_interval)
 
         # Mark F/T sensors as valid in physics mode (always valid on hardware)
-        for arm in self._arms.values():
+        for arm in self._arm_group.values():
             arm.ft_valid = self._physics
 
         # Wire event loop to controller (both physics and kinematic modes)
@@ -334,7 +382,7 @@ class SimContext:
             # Create ownership registry for all arms + entities
             from mj_manipulator.ownership import OwnershipRegistry
 
-            all_names = list(self._arms.keys()) + list(self._entities.keys())
+            all_names = list(self._arm_group.keys()) + list(self._entities.keys())
             self._ownership = OwnershipRegistry(all_names)
 
         self.sync()
@@ -369,7 +417,7 @@ class SimContext:
         more common case where no grasp is active.
         """
         holding_verifiers = []
-        for arm in self._arms.values():
+        for arm in self._arm_group.values():
             gripper = arm.gripper
             if gripper is None or gripper.grasp_verifier is None:
                 continue
@@ -442,123 +490,180 @@ class SimContext:
         - **Background thread** (chat): starts the runner via submit, then
           blocks on Future. The inputhook pumps tick() on the owner thread.
         """
-        from mj_manipulator.planning import PlanResult
+        from mj_manipulator.ownership import OwnerKind
+        from mj_manipulator.planning import PlanResult, PlanGroupResult
         from mj_manipulator.trajectory import Trajectory
 
         if isinstance(item, PlanResult):
             trajectories = item.trajectories
         elif isinstance(item, Trajectory):
             trajectories = [item]
+        elif isinstance(item, PlanGroupResult):
+            trajectories = [r.arm_trajectory for r in item.arm_results.values()]
         else:
             raise TypeError(f"Cannot execute {type(item)}")
 
+        if self._controller is None or self._event_loop is None:
+            raise RuntimeError("Cannot execute: controller is not set")
+
+        first_timestamps = trajectories[0].timestamps
+        for i, traj in enumerate(trajectories[1:], start=1):
+            if not np.allclose(traj.timestamps, first_timestamps):
+                raise ValueError(
+                    f"Trajectory {i} timestamps do not match trajectory 0: "
+                    f"{traj.timestamps} vs {first_timestamps}"
+                )
+            
+        self._deactivate_teleop_for_item(item)
+
+        signal = _SiblingFailureSignal()
         on_owner_thread = threading.get_ident() == self._event_loop._owner_thread
 
+        # Pass 1: refuse to start any trajectory if any entity is unavailable.
+        if self._ownership is not None:
+            for traj in trajectories:
+                if traj.entity is None:
+                    raise ValueError("Trajectory has no entity set")
+                kind, _ = self._ownership.owner_of(traj.entity)
+                if kind != OwnerKind.IDLE:
+                    logger.info("Cannot execute on %s: owned by %s", traj.entity, kind.value)
+                    return False
+
+        # Pass 2: spin up runners for each trajectory
+        started: list[tuple[str, Trajectory, Future[bool]]] = []
         for traj in trajectories:
             entity = traj.entity
             if entity is None:
                 raise ValueError("Trajectory has no entity set")
 
-            # Build per-arm/entity abort function.
-            # The caller-supplied ``abort_fn`` composes with (does not
-            # replace) the ownership abort and the context-level abort:
-            # any of the three returning True halts the trajectory at
-            # the next control cycle.
-            caller_abort = abort_fn  # shadow the outer parameter into closure
-            runner_abort_fn: Callable[[], bool] | None = None
-
+            runner_abort_fn = self._build_abort_fn(entity, abort_fn, failure_signal=signal) 
             if self._ownership is not None:
-                from mj_manipulator.ownership import OwnerKind
-
-                kind, _ = self._ownership.owner_of(entity)
-                if kind != OwnerKind.IDLE:
-                    # Arm is owned by another controller (teleop, etc.).
-                    # Don't fight it — the user or another system has
-                    # explicit control. Return False so the caller knows
-                    # execution didn't happen.
-                    logger.info(
-                        "Cannot execute on %s: owned by %s",
-                        entity,
-                        kind.value,
-                    )
-                    return False
                 self._ownership.acquire(entity, OwnerKind.TRAJECTORY, traj)
 
-                def _make_abort_fn(e=entity, ca=caller_abort):
-                    reg = self._ownership
-                    ctx_abort = self._abort_fn
-                    drop_check = self._make_drop_abort()
-
-                    def _abort() -> bool:
-                        if reg is not None and reg.is_aborted(e):
-                            return True
-                        if ctx_abort is not None and ctx_abort():
-                            return True
-                        if drop_check is not None and drop_check():
-                            return True
-                        if ca is not None and ca():
-                            return True
-                        return False
-
-                    return _abort
-
-                runner_abort_fn = _make_abort_fn()
+            if on_owner_thread:
+                future = self._controller.start_trajectory(entity, traj, runner_abort_fn)
             else:
-                # No ownership registry — still compose context + caller + drop
-                ctx_abort = self._abort_fn
-                drop_check = self._make_drop_abort()
-                if caller_abort is not None or ctx_abort is not None or drop_check is not None:
+                wrapper_future: Future[bool] = Future()
 
-                    def _abort(ca=caller_abort, cx=ctx_abort, dc=drop_check) -> bool:
-                        if cx is not None and cx():
-                            return True
-                        if dc is not None and dc():
-                            return True
-                        if ca is not None and ca():
-                            return True
-                        return False
+                def _start(t=traj, af=runner_abort_fn, rf=wrapper_future) -> None:
+                    if self._controller is None:
+                        raise RuntimeError("Cannot start trajectory: controller is not set")
 
-                    runner_abort_fn = _abort
-
-            try:
-                if on_owner_thread:
-                    # We ARE the tick pump — start runner and drive tick() directly
-                    future = self._controller.start_trajectory(entity, traj, runner_abort_fn)
-                    control_dt = self._controller.control_dt
-                    realtime = self._controller.viewer is not None
-                    t_next = time.monotonic() + control_dt
-                    while not future.done():
-                        self._event_loop.tick()
-                        if realtime:
-                            now = time.monotonic()
-                            if t_next > now:
-                                time.sleep(t_next - now)
-                            t_next = now + control_dt
-                    if not future.result():
-                        return False
-                else:
-                    # Background thread — submit start, block on future while
-                    # the inputhook pumps tick() on the owner thread
-                    runner_future: Future[bool] = Future()
-
-                    def _start(t=traj, af=runner_abort_fn, rf=runner_future):
+                    def _on_done(done_f, rf=rf, fs=signal):
                         try:
-                            f = self._controller.start_trajectory(t.entity, t, af)
-                            f.add_done_callback(lambda done_f: rf.set_result(done_f.result()))
+                            result = done_f.result()
                         except Exception as e:
                             rf.set_exception(e)
+                            fs.mark()
+                            return
+                        rf.set_result(result)
+                        if not result:
+                            fs.mark()
 
-                    self._event_loop.submit(_start)
-                    if not runner_future.result():
-                        return False
-            finally:
-                # Release ownership (unless preempted — owner already changed)
-                if self._ownership is not None:
+                    try:
+                        f = self._controller.start_trajectory(t.entity, t, af)
+                        f.add_done_callback(_on_done)
+                    except Exception as e:
+                        rf.set_exception(e)
+
+                self._event_loop.submit(_start)
+                future = wrapper_future
+
+            started.append((entity, traj, future))
+
+        # Pass 3: wait for all runners to finish, pumping tick() if on owner thread
+        try:
+            if on_owner_thread:
+                control_dt = self._controller.control_dt
+                realtime = self._controller.viewer is not None
+                t_next = time.monotonic() + control_dt
+                while not all(f.done() for _, _, f in started):
+                    self._event_loop.tick()
+
+                    for _, _, f in started:
+                        if not f.done():
+                            continue
+                        try:
+                            result = f.result()
+                        except Exception as e:
+                            logger.exception("Trajectory runner raised exception: %s", e)
+                            result = False
+                        if not result:
+                            signal.mark()
+
+                    if realtime:
+                        now = time.monotonic()
+                        if t_next > now:
+                            time.sleep(t_next - now)
+                        t_next = now + control_dt
+
+            results = []
+            for entity, traj, f in started:
+                try:
+                    result = f.result()
+                except Exception as e:
+                    logger.exception("Trajectory runner raised exception: %s", e)
+                    result = False
+                results.append(result)
+            return all(results)
+        finally:
+            if self._ownership is not None:
+                for entity, traj, _ in started:
                     kind, owner = self._ownership.owner_of(entity)
                     if owner is traj:
                         self._ownership.release(entity, traj)
 
-        return True
+    def _build_abort_fn(
+        self,
+        entity: str,
+        caller_abort: Callable[[], bool] | None,
+        failure_signal: _SiblingFailureSignal | None,
+    ) -> Callable[[], bool] | None:
+        """Build the per-entity abort predicate composing ownership abort,
+        context-level abort, drop-check, and the caller-supplied abort_fn.
+ 
+        Factored out of _execute_tick_driven so both the single-item path
+        and the multi-trajectory "start pass" can share it without
+        duplicating the closure-building logic.
+        """
+        if self._ownership is not None:
+            reg = self._ownership
+            ctx_abort = self._abort_fn
+            drop_check = self._make_drop_abort()
+ 
+            def _abort(e=entity, ca=caller_abort, fs=failure_signal) -> bool:
+                if reg is not None and reg.is_aborted(e):
+                    return True
+                if ctx_abort is not None and ctx_abort():
+                    return True
+                if drop_check is not None and drop_check():
+                    return True
+                if ca is not None and ca():
+                    return True
+                if fs is not None and fs.triggered():
+                    return True
+                return False
+ 
+            return _abort
+ 
+        ctx_abort = self._abort_fn
+        drop_check = self._make_drop_abort()
+        if caller_abort is not None or ctx_abort is not None or drop_check is not None or failure_signal is not None:
+ 
+            def _abort(ca=caller_abort, cx=ctx_abort, dc=drop_check, fs=failure_signal) -> bool:
+                if cx is not None and cx():
+                    return True
+                if dc is not None and dc():
+                    return True
+                if ca is not None and ca():
+                    return True
+                if fs is not None and fs.triggered():
+                    return True
+                return False
+ 
+            return _abort
+ 
+        return None
 
     def _execute_impl(
         self,
@@ -567,7 +672,7 @@ class SimContext:
         abort_fn: Callable[[], bool] | None = None,
     ) -> bool:
         """Execute implementation — synchronous, always runs on the physics thread."""
-        from mj_manipulator.planning import PlanResult
+        from mj_manipulator.planning import PlanResult, PlanGroupResult
         from mj_manipulator.trajectory import Trajectory
 
         # In the kinematic/legacy path, abort checks happen between
@@ -592,6 +697,24 @@ class SimContext:
             if _should_abort():
                 return False
             return self._execute_trajectory(item)
+        elif isinstance(item, PlanGroupResult):
+            arm_results = item.arm_results
+            trajectories = {name: r.arm_trajectory for name, r in arm_results.items()}
+            shared_timestamps = next(iter(trajectories.values())).timestamps
+
+            for t in shared_timestamps:
+                if _should_abort():
+                    return False
+                for name, traj in trajectories.items():
+                    pos, _, _ = traj.sample(t)
+                    arm = self._arm_group[name]
+                    for i, idx in enumerate(arm.joint_qpos_indices):
+                        self._data.qpos[idx] = pos[i]
+                mujoco.mj_forward(self._model, self._data)
+                if self._viewer is not None:
+                    self._throttled_viewer_sync()
+            return True
+
         else:
             raise TypeError(f"Cannot execute {type(item)}")
 
@@ -737,7 +860,7 @@ class SimContext:
 
         # 3. Release all grasps: clear grasp manager bookkeeping, detach
         #    kinematic welds, and reset grasp verifiers to IDLE.
-        for arm in self._arms.values():
+        for arm in self._arm_group.values():
             arm_name = arm.config.name
             gm = arm.grasp_manager
             if gm is not None:
@@ -798,12 +921,12 @@ class SimContext:
         Returns:
             SimArmController for the specified arm.
         """
-        if name not in self._arms:
+        if name not in self._arm_group:
             raise ValueError(f"Unknown arm: {name}")
 
         if name not in self._arm_controllers:
             self._arm_controllers[name] = SimArmController(
-                self._arms[name],
+                self._arm_group[name],
                 self,
             )
         return self._arm_controllers[name]
@@ -839,13 +962,15 @@ class SimContext:
         if self._ownership is None:
             return
         from mj_manipulator.ownership import OwnerKind
-        from mj_manipulator.planning import PlanResult
+        from mj_manipulator.planning import PlanResult, PlanGroupResult
         from mj_manipulator.trajectory import Trajectory
 
         if isinstance(item, PlanResult):
             entities = {t.entity for t in item.trajectories if t.entity}
         elif isinstance(item, Trajectory):
             entities = {item.entity} if item.entity else set()
+        elif isinstance(item, PlanGroupResult):
+            entities = {t.entity for r in item.arm_results.values() for t in [r.arm_trajectory] if t.entity}
         else:
             return
 
@@ -904,7 +1029,7 @@ class SimContext:
         self._controller = PhysicsController(
             self._model,
             self._data,
-            self._arms,
+            self._arm_group,
             config=exec_config,
             gripper_config=gripper_config,
             viewer=self._viewer,
@@ -914,7 +1039,7 @@ class SimContext:
             abort_fn=self._abort_fn,
         )
 
-        for name in self._arms:
+        for name in self._arm_group:
             self._executors[name] = self._controller.get_executor(name)
 
         for name in self._entities:
@@ -928,10 +1053,15 @@ class SimContext:
         """Create KinematicController and per-arm executor wrappers."""
         from mj_manipulator.kinematic_controller import KinematicController
 
+        exec_config = None
+        if self._physics_config is not None:
+            exec_config = self._physics_config.execution
+
         self._controller = KinematicController(
             self._model,
             self._data,
-            self._arms,
+            self._arm_group,
+            config=exec_config,
             viewer=self._viewer,
             viewer_sync_interval=viewer_sync_interval,
             initial_positions=self._initial_positions,
@@ -940,7 +1070,7 @@ class SimContext:
         )
 
         # Executor wrappers for the no-event-loop legacy path
-        for name in self._arms:
+        for name in self._arm_group:
             self._executors[name] = self._controller.get_executor(name)
 
         for name in self._entities:

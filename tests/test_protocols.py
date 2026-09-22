@@ -128,6 +128,13 @@ class MockGripper:
     def get_actual_position(self) -> float:
         return 0.0 if not self._holding else 0.7
 
+    def get_width(self) -> float:
+        return 1.0 - self.get_actual_position()
+
+    def set_width(self, width: float, synchronous: bool = True) -> bool:
+        self._holding = width < 0.5
+        return True
+
 
 class MockIKSolver:
     """Minimal IK solver for protocol testing."""

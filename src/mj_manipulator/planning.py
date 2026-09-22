@@ -11,6 +11,38 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from mj_manipulator.trajectory import Trajectory
 
+@dataclass
+class PlanGroupResult:
+    """Result of a planning operation for a group of arms.
+
+    Attributes:
+        arm_results: Mapping from arm name to PlanResult
+    """
+
+    arm_results: dict[str, PlanResult]
+
+    @property
+    def success(self) -> bool:
+        """Whether planning succeeded for all arms."""
+        return all(result.success for result in self.arm_results.values())
+
+    @property
+    def left(self) -> "Trajectory | None":
+        result = self.arm_results.get("left")
+        return result.arm_trajectory if result is not None else None
+
+    @property
+    def right(self) -> "Trajectory | None":
+        result = self.arm_results.get("right")
+        return result.arm_trajectory if result is not None else None
+
+    @classmethod
+    def from_trajectories(cls, trajectories: dict[str, "Trajectory"]) -> "PlanGroupResult":
+        arm_results = {
+            name: PlanResult(arm_name=name, arm_trajectory=traj)
+            for name, traj in trajectories.items()
+        }
+        return cls(arm_results=arm_results)
 
 @dataclass
 class PlanResult:

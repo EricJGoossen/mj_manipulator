@@ -98,6 +98,48 @@ class Trajectory:
 
         return pos, vel, acc
 
+    def split_trajectory(self, arm_group) -> dict[str, "Trajectory"]:
+        """Split a trajectory into per-arm trajectories.
+
+        Args:
+            arm_group: The ArmGroup containing the arms to split for.
+
+        Returns:
+            A dictionary mapping arm names to their corresponding Trajectory.
+        """
+        if self.positions.shape[1] != sum(arm.dof for arm in arm_group.arms.values()):
+            raise ValueError(
+                f"Trajectory DOF {self.positions.shape[1]} doesn't match total DOF of arm group {sum(arm.dof for arm in arm_group.arms.values())}"
+            )
+
+        per_arm_trajectories = {}
+        total_dof = 0
+        for arm_name in arm_group.keys():
+            arm_dof = arm_group[arm_name].dof
+            total_dof += arm_dof
+
+            # Check all names in trajectory_names are in arm_group.arms[arm_name].joint_names
+            trajectory_names = None
+            if self.joint_names is not None:
+                trajectory_names = self.joint_names[total_dof - arm_dof:total_dof]
+
+                if trajectory_names != list(arm_group[arm_name].config.joint_names):
+                    raise ValueError(
+                        f"Joint names for arm '{arm_name}' don't match: "
+                        f"trajectory slice has {trajectory_names}, arm expects "
+                        f"{list(arm_group[arm_name].config.joint_names)}"
+                    )
+
+            per_arm_trajectories[arm_name] = Trajectory(
+                timestamps=self.timestamps,
+                positions=self.positions[:, total_dof - arm_dof:total_dof],
+                velocities=self.velocities[:, total_dof - arm_dof:total_dof],
+                accelerations=self.accelerations[:, total_dof - arm_dof:total_dof],
+                entity=arm_name,
+                joint_names=trajectory_names,
+            )
+        return per_arm_trajectories
+
     @classmethod
     def from_path(
         cls,
@@ -107,8 +149,25 @@ class Trajectory:
         control_dt: float = 0.008,
         entity: str | None = None,
         joint_names: list[str] | None = None,
+        retime_max_iters: int = 8,
+        retime_gridpoints: int = 1000,
+        retime_accel_tol: float = 1e-3,
+        retime_shrink_factor: float = 0.97,
+        collision_checker=None,
+        collision_max_densify: int = 4,
     ) -> "Trajectory":
         """Create time-optimal trajectory from geometric path using TOPP-RA.
+
+        The input `path` is only guaranteed collision-free at the straight-line
+        edges the planner checked -- retiming fits a smooth cubic spline
+        (`toppra.SplineInterpolator`) through those waypoints, and that spline
+        can bow outward between waypoints (e.g. around a corner near an
+        obstacle) into space the planner never validated. If `collision_checker`
+        is given, every sampled position of the retimed trajectory is checked
+        against it; on a collision, the path is densified (a midpoint is
+        inserted between every consecutive pair of waypoints, halving the
+        spline's freedom to deviate from the checked straight lines) and
+        retiming is retried, up to `collision_max_densify` times.
 
         Args:
             path: List of waypoint configurations (joint angles in radians)
@@ -117,13 +176,21 @@ class Trajectory:
             control_dt: Control timestep in seconds (default: 125 Hz)
             entity: Entity name for hardware deployment
             joint_names: MuJoCo joint names for validation
+            collision_checker: Optional object with `.get_contacts(q)` (the
+                mj_manipulator CollisionChecker protocol). When given, the
+                retimed trajectory is validated and re-densified on collision
+                instead of being returned as-is.
+            collision_max_densify: Maximum number of densify-and-retry rounds
+                when `collision_checker` is given.
 
         Returns:
             Trajectory with time-optimal parameterization respecting limits
 
         Raises:
             ValueError: If path is empty or has inconsistent dimensions
-            RuntimeError: If TOPP-RA fails to find a valid parameterization
+            RuntimeError: If TOPP-RA fails to find a valid parameterization, or
+                if `collision_checker` still reports a collision after
+                `collision_max_densify` densify rounds
         """
         if not path:
             raise ValueError("Path cannot be empty")
@@ -157,35 +224,56 @@ class Trajectory:
                 joint_names=joint_names,
             )
 
-        path_positions = toppra.SplineInterpolator(np.linspace(0, 1, len(path_array)), path_array)
+        for densify_attempt in range(collision_max_densify + 1):
+            path_positions = toppra.SplineInterpolator(np.linspace(0, 1, len(path_array)), path_array)
 
-        vel_limits_minmax = np.stack((-vel_limits, vel_limits)).T
-        acc_limits_minmax = np.stack((-acc_limits, acc_limits)).T
+            # The solve grid must stay dense relative to the knot count (see
+            # _solve_toppra's docstring) -- a fixed retime_gridpoints becomes
+            # too coarse once densify has multiplied the knot count, and
+            # produces spurious, unconverging acceleration violations below.
+            n_gridpoints = max(retime_gridpoints, 10 * len(path_array))
 
-        pc_vel = constraint.JointVelocityConstraint(vel_limits_minmax)
-        pc_acc = constraint.JointAccelerationConstraint(acc_limits_minmax)
+            working_acc_limits = np.asarray(acc_limits, dtype=float).copy()
 
-        instance = algo.TOPPRA(
-            [pc_vel, pc_acc],
-            path_positions,
-            parametrizer="ParametrizeConstAccel",
-        )
+            for attempt in range(retime_max_iters):
+                timestamps, positions, velocities, accelerations = cls._solve_toppra(
+                    path_positions, vel_limits, working_acc_limits, control_dt,
+                    n_gridpoints=n_gridpoints,
+                )
+                amax = np.max(np.abs(accelerations), axis=0)
+                violated = amax > acc_limits * (1.0 + retime_accel_tol)
+                if not violated.any():
+                    break
 
-        jnt_traj = instance.compute_trajectory()
+                working_acc_limits[violated] *= retime_shrink_factor
+            else:
+                raise RuntimeError(
+                    f"TOPP-RA could not produce a trajectory within acceleration limits after "
+                    f"{retime_max_iters} retighten attempts (joint(s) "
+                    f"{np.where(violated)[0].tolist()} still over limit). This means the path "
+                    "itself likely demands more acceleration than the joint is rated for, not "
+                    "just a reparametrization artifact -- check the path, not just the retimer."
+                )
 
-        if jnt_traj is None:
-            raise RuntimeError(
-                "TOPP-RA failed to find valid trajectory. Path may violate velocity or acceleration constraints."
-            )
+            if collision_checker is None:
+                break
 
-        duration = jnt_traj.duration
-        timestamps = np.arange(0.0, duration, control_dt)
-        if not np.isclose(timestamps[-1], duration, rtol=0.0, atol=1e-8):
-            timestamps = np.append(timestamps, duration)
+            collision = cls._first_collision(collision_checker, positions)
+            if collision is None:
+                break
 
-        positions = jnt_traj(timestamps)
-        velocities = jnt_traj(timestamps, 1)
-        accelerations = jnt_traj(timestamps, 2)
+            if densify_attempt == collision_max_densify:
+                idx, contacts = collision
+                raise RuntimeError(
+                    f"TOPP-RA retiming produced a trajectory that collides at sample "
+                    f"{idx}/{len(positions)} ({contacts}) even after densifying the input "
+                    f"path from {len(path)} to {len(path_array)} waypoints. The geometric "
+                    "path itself was collision-free at the checked resolution, so the spline "
+                    "fit through it is bowing into the obstacle between waypoints -- consider "
+                    "a smaller planner step_size or a collision safety margin."
+                )
+
+            path_array = cls._densify_path(path_array)
 
         return cls(
             timestamps=timestamps,
@@ -196,6 +284,84 @@ class Trajectory:
             joint_names=joint_names,
         )
 
+    @staticmethod
+    def _densify_path(path_array: np.ndarray) -> np.ndarray:
+        """Insert a midpoint between every consecutive waypoint pair.
+
+        Halves the spacing the spline fit has to bridge, which shrinks how
+        far a cubic spline through the path can bow away from the original
+        (collision-checked) straight-line segments.
+        """
+        midpoints = (path_array[:-1] + path_array[1:]) / 2.0
+        densified = np.empty((2 * len(path_array) - 1, path_array.shape[1]), dtype=path_array.dtype)
+        densified[0::2] = path_array
+        densified[1::2] = midpoints
+        return densified
+
+    @staticmethod
+    def _first_collision(collision_checker, positions: np.ndarray, *, interp_substeps: int = 8):
+        """Return (index, contacts) for the first colliding sample, or None.
+
+        Checks `interp_substeps` sub-samples of each row-to-row chord (the
+        far endpoint included), not just the stored rows -- `sample()`
+        linearly interpolates between rows, so a caller resampling at its
+        own rate can land anywhere along that chord, and a graze strictly
+        between two clear rows would otherwise go undetected.
+        """
+        if len(positions) == 0:
+            return None
+        contacts = collision_checker.get_contacts(positions[0])
+        if contacts:
+            return 0, contacts
+        for i in range(1, len(positions)):
+            prev, cur = positions[i - 1], positions[i]
+            for step in range(1, interp_substeps + 1):
+                alpha = step / interp_substeps
+                q = (1 - alpha) * prev + alpha * cur
+                contacts = collision_checker.get_contacts(q)
+                if contacts:
+                    return (i - 1) + alpha, contacts
+        return None
+
+    @staticmethod
+    def _solve_toppra(path_positions, vel_limits, acc_limits, control_dt, n_gridpoints):
+        """Run TOPP-RA once at a given per-joint acceleration bound and an
+        explicit, dense solve grid.
+
+        The dense grid isn't just about accuracy: leaving `gridpoints`
+        unset lets TOPP-RA derive its solve grid from the path's own knot
+        spacing, which for a sparse/uneven CBiRRT path can be coarse enough
+        to produce a genuinely slower-than-optimal parametrization on top
+        of the sampling inaccuracy -- an explicit dense grid fixes both at
+        once (see the empirical comparison this replaced: coarse-grid
+        durations were 30-50% longer than dense-grid ones, independent of
+        the accel-limit issue).
+        """
+        vel_limits_minmax = np.stack((-vel_limits, vel_limits)).T
+        acc_limits_minmax = np.stack((-acc_limits, acc_limits)).T
+
+        pc_vel = constraint.JointVelocityConstraint(vel_limits_minmax)
+        pc_acc = constraint.JointAccelerationConstraint(acc_limits_minmax)
+
+        instance = algo.TOPPRA(
+            [pc_vel, pc_acc],
+            path_positions,
+            gridpoints=np.linspace(0, 1, n_gridpoints),
+            parametrizer="ParametrizeConstAccel",
+        )
+
+        jnt_traj = instance.compute_trajectory()
+        if jnt_traj is None:
+            raise RuntimeError(
+                "TOPP-RA failed to find valid trajectory. Path may violate velocity or acceleration constraints."
+            )
+
+        duration = jnt_traj.duration
+        timestamps = np.arange(0.0, duration, control_dt)
+        if not np.isclose(timestamps[-1], duration, rtol=0.0, atol=1e-8):
+            timestamps = np.append(timestamps, duration)
+
+        return timestamps, jnt_traj(timestamps), jnt_traj(timestamps, 1), jnt_traj(timestamps, 2)
 
 def create_linear_trajectory(
     start: float,

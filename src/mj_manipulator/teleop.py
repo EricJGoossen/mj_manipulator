@@ -359,9 +359,9 @@ class TeleopController:
 
         pos = gripper.get_actual_position()
         if pos > 0.5:
-            self._ctx.arm(arm_name).release()
+            self._ctx.arm(arm_name).release(synchronous=False)
         else:
-            self._ctx.arm(arm_name).grasp()
+            self._ctx.arm(arm_name).grasp(synchronous=False)
         self._ctx.sync()
 
         # Restore tracking at current EE pose (not the old target)
