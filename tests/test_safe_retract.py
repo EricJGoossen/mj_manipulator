@@ -20,14 +20,15 @@ import numpy as np
 import pytest
 from mj_environment import Environment
 
-from mj_manipulator.arms.franka import FRANKA_HOME
 from mj_manipulator.arm_group import ArmGroup
+from mj_manipulator.arms.franka import FRANKA_HOME
 from mj_manipulator.config import ArmGroupConfig
 from mj_manipulator.safe_retract import safe_retract, translational_waypoints
 
 # ---------------------------------------------------------------------------
 # TestTranslationalWaypoints helper
 # ---------------------------------------------------------------------------
+
 
 class TestTranslationalWaypoints:
     """Unit tests for the SE(3) waypoint generator."""
@@ -94,6 +95,7 @@ class TestTranslationalWaypoints:
         start[:3, 3] = [0.5, -0.2, 0.3]
         wps = translational_waypoints(start, np.array([0.0, 0.0, 1.0]), distance=0.1, segment_length=0.05)
         np.testing.assert_allclose(wps[-1][:3, 3], [0.5, -0.2, 0.4], atol=1e-12)
+
 
 # ---------------------------------------------------------------------------
 # Input validation — no physics needed
@@ -334,7 +336,7 @@ class TestSafeRetractCollision:
 
         from mj_manipulator.sim_context import SimContext
 
-        arm = franka_with_ceiling        
+        arm = franka_with_ceiling
         group = ArmGroup(
             {arm.config.name: arm},
             ArmGroupConfig(
@@ -471,7 +473,7 @@ class TestCartesianPathSmoothness:
         from mj_manipulator.safe_retract import safe_retract
         from mj_manipulator.sim_context import SimContext
 
-        arm = franka_arm_at_home        
+        arm = franka_arm_at_home
         group = ArmGroup(
             {arm.config.name: arm},
             ArmGroupConfig(
@@ -498,7 +500,7 @@ class TestCartesianPathSmoothness:
             headless=True,
         ) as ctx:
             twist = np.array([0.0, 0.0, 0.1, 0.0, 0.0, 0.0])
-            safe_retract(group, ctx, twist=twist, max_distance=0.05,  max_branch_jump=0.5)
+            safe_retract(group, ctx, twist=twist, max_distance=0.05, max_branch_jump=0.5)
 
         q_end = arm.get_joint_positions()
         total_joint_motion = float(np.linalg.norm(q_end - q_start))

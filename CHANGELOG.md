@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### New features
+
+- **ArmGroup: planning for one or more arms as one chain.** `mj_manipulator.arm_group.ArmGroup` concatenates its arms' joints and plans in that combined space, so the arms are collision-checked against each other at every step. Goals are keyed by arm name (`plan_to_configuration`, `plan_to_poses`, `plan_to_tsrs`, `plan_cartesian_path`); unnamed arms hold. A list goal is a sequence of waypoints, not a union. `ArmGroup.retime` validates the retimed trajectory against collisions. New public types: `ArmGroup`, `ArmGroupConfig`, `PlanGroupResult`; `Trajectory.split_trajectory(group)` splits a combined trajectory per arm.
+- **Synchronized multi-arm execution.** `SimContext.execute(PlanGroupResult)` runs every arm's trajectory at the same time; one arm's failure or abort stops the others, and nothing starts unless every arm is free. In tick-driven mode the trajectories must share timestamps.
+- **Collision safety margin.** `PlanningDefaults.collision_margin_mm` (default 5 mm) makes planning and retiming treat geometry closer than the margin as colliding.
+- **Retimed trajectories are collision-checked.** `Trajectory.from_path(..., collision_checker=...)` checks every sample (and sub-samples between rows) of the retimed trajectory; on a collision it densifies the path and retries, up to `collision_max_densify` times, then raises.
+- **Gripper width control.** `Gripper.get_width()` / `set_width(width)` take a fraction open (1 = open). `ArmController.grasp` / `release` take `synchronous` (teleop's gripper toggle no longer blocks its loop).
+- `CollisionChecker.body_ids_for_joints`; `ArmConfig.max_ik_solutions`; `ExecutionConfig.retime_*` retiming parameters.
+
+### Changed
+
+- **`Trajectory.from_path` enforces acceleration limits.** It retimes on a dense grid and, while any joint exceeds its acceleration limit, shrinks that joint's limit and retimes again (up to `retime_max_iters`), raising `RuntimeError` if it cannot comply. It used to return the first TOPP-RA solution as-is.
+- **`SimContext.execute(PlanResult)` in tick-driven mode** runs the result's trajectories together, so a base trajectory and an arm trajectory must share timestamps.
+- **ExecutionContext pacing on hardware.** `step()` / `step_cartesian()` on hardware publish and return immediately; a caller streaming to hardware paces its own loop at `control_dt` (see mj_manipulator_ros `HardwareContext`). Simulation is unchanged.
+- **Dependency:** `tsr` is installed as `sstsr` (still imported as `tsr`).
+
+### Migrating
+
+- **Planning moved from `Arm` to `ArmGroup`.** `Arm.plan_to_configuration(s)`, `plan_to_pose(s)`, `plan_to_tsrs`, `create_planner`, `retime` and `check_collisions` are gone; wrap the arm in a one-arm `ArmGroup` and pass goals keyed by its name. `ContextRobotModel` now lives in `arm_group` and takes `ee_site_id_group` / `tcp_offset_group` lists.
+- **`mj_manipulator.cartesian_path` is gone.** Use `ArmGroup.plan_cartesian_path`; `translational_waypoints` is in `mj_manipulator.safe_retract`.
+- **`safe_retract`, `RobotBase`, `SimContext` and the controllers take an `ArmGroup`** (`RobotBase(arm_group=...)`, attribute `robot.arm_group`) instead of an `arms` dict.
+- **Custom `Gripper` implementations** need `get_width()` and `set_width(width, synchronous=True)` to satisfy the protocol (`_BaseGripper` subclasses inherit them).
+- **Custom `ArmController` implementations** used with `TeleopController` must accept `synchronous` in `grasp` and `release`.
+- **Code streaming to hardware via `ctx.step` / `ctx.step_cartesian`** must sleep `control_dt` per cycle itself. `CartesianController.move` does not; give it a pacing `step_fn` on hardware.
+
 ## v2.0.0 (2026-04-17)
 
 104 commits since v1.0.0. Major additions to grasp verification, multi-arm control, perception, and gripper integration — plus a second bundled robot (KUKA iiwa 14) and diagnostic tooling for the gripper integration story.

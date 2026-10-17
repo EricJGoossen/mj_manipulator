@@ -143,6 +143,64 @@ class TestFromPath:
         assert traj.duration > 0
 
 
+class _ScriptedChecker:
+    """Collision checker that reports contacts for the first ``n_colliding`` calls."""
+
+    def __init__(self, n_colliding: int):
+        self.calls = 0
+        self._n = n_colliding
+
+    def get_contacts(self, q):
+        self.calls += 1
+        return [("link", "obstacle", 1.0)] if self.calls <= self._n else []
+
+
+class TestFromPathRetimeChecks:
+    """Acceleration-limit enforcement and collision validation in from_path."""
+
+    PATH = [np.array([0.0, 0.0]), np.array([0.6, -0.3]), np.array([0.2, 0.9]), np.array([1.0, 1.0])]
+    VEL = np.array([1.0, 1.0])
+    ACC = np.array([2.0, 2.0])
+
+    def test_accelerations_within_limits(self):
+        traj = Trajectory.from_path(self.PATH, self.VEL, self.ACC)
+        assert np.all(np.max(np.abs(traj.accelerations), axis=0) <= self.ACC * (1 + 1e-3))
+
+    def test_collision_free_path_checks_and_returns(self):
+        checker = _ScriptedChecker(n_colliding=0)
+        traj = Trajectory.from_path(self.PATH, self.VEL, self.ACC, collision_checker=checker)
+        assert checker.calls > traj.num_waypoints  # sub-samples between rows are checked too
+        np.testing.assert_allclose(traj.positions[-1], self.PATH[-1], atol=1e-6)
+
+    def test_collision_densifies_and_retries(self):
+        """A collision on the first pass triggers one densify round, then succeeds."""
+        checker = _ScriptedChecker(n_colliding=1)
+        traj = Trajectory.from_path(self.PATH, self.VEL, self.ACC, collision_checker=checker)
+        np.testing.assert_allclose(traj.positions[-1], self.PATH[-1], atol=1e-6)
+
+    def test_persistent_collision_raises(self):
+        checker = _ScriptedChecker(n_colliding=10**9)
+        with pytest.raises(RuntimeError, match="collides"):
+            Trajectory.from_path(self.PATH, self.VEL, self.ACC, collision_checker=checker, collision_max_densify=2)
+
+    def test_densify_inserts_midpoints(self):
+        path = np.array([[0.0, 0.0], [1.0, 2.0], [3.0, 2.0]])
+        dense = Trajectory._densify_path(path)
+        np.testing.assert_allclose(dense, [[0, 0], [0.5, 1], [1, 2], [2, 2], [3, 2]])
+
+    def test_first_collision_finds_graze_between_rows(self):
+        """A contact strictly between two clear rows is still reported."""
+
+        class Graze:
+            def get_contacts(self, q):
+                return [("a", "b", 0.1)] if 0.4 < q[0] < 0.6 else []
+
+        positions = np.array([[0.0], [1.0]])
+        idx, contacts = Trajectory._first_collision(Graze(), positions)
+        assert 0.4 < idx < 0.6
+        assert contacts
+
+
 class TestLinearTrajectory:
     """Tests for 1D trapezoidal trajectory generation."""
 

@@ -48,7 +48,7 @@ class ArmController(Protocol):
         HardwareArmController (robot-specific) — real gripper via ROS/RTDE/etc.
     """
 
-    def grasp(self, object_name: str) -> str | None:
+    def grasp(self, object_name: str, synchronous: bool = True) -> str | None:
         """Close gripper and attempt to grasp an object.
 
         Handles the full grasp pipeline:
@@ -58,13 +58,16 @@ class ArmController(Protocol):
 
         Args:
             object_name: Name of the object to grasp.
+            synchronous: If True, block until the gripper finishes moving.
+                If False, send the command and return (teleop uses this so
+                its loop is not held up); in kinematic sim it has no effect.
 
         Returns:
             Name of grasped object if successful, None otherwise.
         """
         ...
 
-    def release(self, object_name: str | None = None) -> None:
+    def release(self, object_name: str | None = None, synchronous: bool = True) -> None:
         """Open gripper and release held object(s).
 
         Handles the full release pipeline:
@@ -74,6 +77,8 @@ class ArmController(Protocol):
 
         Args:
             object_name: Specific object to release, or None for all.
+            synchronous: If True, block until the gripper finishes moving.
+                If False, send the command and return.
         """
         ...
 
@@ -138,7 +143,8 @@ class ExecutionContext(Protocol):
         Arms not in ``targets`` hold their current position.
 
         In simulation: steps MuJoCo physics (or sets qpos for kinematic mode).
-        On hardware: sends joint commands and waits for one control cycle.
+        On hardware: publishes the joint commands and returns immediately;
+        a caller streaming to hardware paces its own loop at ``control_dt``.
 
         Args:
             targets: Dict mapping arm names to target joint positions.
@@ -160,7 +166,8 @@ class ExecutionContext(Protocol):
 
         In simulation: uses reactive lookahead (2x control_dt) for smooth PD
         control (physics) or direct qpos setting (kinematic).
-        On hardware: streams to low-level joint controller.
+        On hardware: streams to the low-level joint controller and returns
+        immediately; the caller paces its own loop at ``control_dt``.
 
         Args:
             arm_name: Which arm to control.

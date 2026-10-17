@@ -11,9 +11,14 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from mj_manipulator.trajectory import Trajectory
 
+
 @dataclass
 class PlanGroupResult:
     """Result of a planning operation for a group of arms.
+
+    An execution context runs every arm's trajectory at the same time, so
+    they must share timestamps (as the per-arm pieces of
+    ``Trajectory.split_trajectory`` do).
 
     Attributes:
         arm_results: Mapping from arm name to PlanResult
@@ -28,21 +33,22 @@ class PlanGroupResult:
 
     @property
     def left(self) -> "Trajectory | None":
+        """Trajectory of the arm named ``"left"``, if any (bimanual convenience)."""
         result = self.arm_results.get("left")
         return result.arm_trajectory if result is not None else None
 
     @property
     def right(self) -> "Trajectory | None":
+        """Trajectory of the arm named ``"right"``, if any (bimanual convenience)."""
         result = self.arm_results.get("right")
         return result.arm_trajectory if result is not None else None
 
     @classmethod
     def from_trajectories(cls, trajectories: dict[str, "Trajectory"]) -> "PlanGroupResult":
-        arm_results = {
-            name: PlanResult(arm_name=name, arm_trajectory=traj)
-            for name, traj in trajectories.items()
-        }
+        """Wrap per-arm trajectories (e.g. from ``split_trajectory``) in a result."""
+        arm_results = {name: PlanResult(arm_name=name, arm_trajectory=traj) for name, traj in trajectories.items()}
         return cls(arm_results=arm_results)
+
 
 @dataclass
 class PlanResult:

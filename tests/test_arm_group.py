@@ -1,15 +1,15 @@
-"""Unit tests for mj_manipulator.arm_group.ArmGroup.
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Siddhartha Srinivasa
 
-Scope: these tests exercise ArmGroup's own logic — the Mapping protocol,
-state-query concatenation, frame normalization, cross-product goal
-filtering, and planner-config construction — using a real Arm backed by a
-small synthetic-but-real MuJoCo model/Environment, with a stubbed-out
-CBiRRT planner and collision checker. The planner/collision boundary is
-still faked (FakePlanner/FakeCollision) since exercising the actual
-CBiRRT planner belongs in an integration test (e.g. the acceptance test in
-openarm/tests/test_openarm_bimanual_planning.py), not here.
+"""Unit tests for :class:`mj_manipulator.arm_group.ArmGroup`.
 
-Run with:  uv run pytest mj_manipulator/tests/test_arm_group.py -v
+Covers ArmGroup's own logic -- the Mapping protocol, state-query
+concatenation, frame normalization, cross-product goal filtering, planner
+config construction, collision reporting and retiming -- using real Arms
+backed by a small synthetic MuJoCo model. The planner and collision checker
+are faked (FakePlanner/FakeCollision): end-to-end planning through CBiRRT is
+covered by the Franka integration tests in test_cartesian_path.py and
+test_safe_retract.py.
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ UR5E_HOME = np.array([-1.5708, -1.5708, 1.5708, -1.5708, -1.5708, 0])
 UR5E_VEL = np.array([3.14, 3.14, 3.14, 6.28, 6.28, 6.28]) * 0.5
 UR5E_ACC = np.array([2.5, 2.5, 2.5, 5.0, 5.0, 5.0]) * 0.5
 
+
 def _ur5e_config() -> ArmConfig:
     return ArmConfig(
         name="ur5e",
@@ -48,6 +49,7 @@ def _ur5e_config() -> ArmConfig:
         kinematic_limits=KinematicLimits(velocity=UR5E_VEL, acceleration=UR5E_ACC),
         ee_site="attachment_site",
     )
+
 
 @pytest.fixture
 def ur5e_env():
@@ -59,6 +61,7 @@ def ur5e_env():
     except FileNotFoundError:
         pytest.skip("mujoco_menagerie not found")
     return Environment(str(scene))
+
 
 @pytest.fixture
 def ur5e_arm(ur5e_env):
@@ -122,6 +125,29 @@ class TestAdapters:
 
         q_after = ur5e_arm.get_joint_positions()
         np.testing.assert_allclose(q_after, q_before, atol=1e-10)
+
+    def test_context_robot_model_several_sites_returns_list(self, ur5e_arm):
+        """With several sites, FK returns one pose per site, each with its own tcp_offset."""
+        model = ur5e_arm.env.model
+        data = mujoco.MjData(model)
+        offset = np.eye(4)
+        offset[2, 3] = 0.1
+        site = ur5e_arm.ee_site_id
+
+        ctx_model = ContextRobotModel(
+            model=model,
+            data=data,
+            joint_qpos_indices=ur5e_arm.joint_qpos_indices,
+            ee_site_id_group=[site, site],
+            joint_limits=ur5e_arm.get_joint_limits(),
+            tcp_offset_group=[None, offset],
+        )
+
+        poses = ctx_model.forward_kinematics(UR5E_HOME)
+        assert isinstance(poses, list) and len(poses) == 2
+        np.testing.assert_allclose(poses[0], ur5e_arm.forward_kinematics(UR5E_HOME), atol=1e-6)
+        np.testing.assert_allclose(poses[1], poses[0] @ offset, atol=1e-6)
+
 
 # =============================================================================
 # Fakes
@@ -270,7 +296,6 @@ def two_arm_group():
     return ArmGroup(arms, config)
 
 
-
 # =============================================================================
 # Construction
 # =============================================================================
@@ -291,6 +316,11 @@ class TestConstruction:
         )
         with pytest.raises(ValueError, match="joint_names mismatch"):
             ArmGroup({"left": left, "right": right}, bad_config)
+
+    def test_config_entity_type_and_execution_defaults(self):
+        config = ArmGroupConfig(name="g", entity_type="anything", joint_names=[])
+        assert config.entity_type == "arm_group"
+        assert config.execution_defaults is not None
 
 
 # =============================================================================
@@ -348,7 +378,10 @@ class TestMappingProtocol:
 class TestStateQueries:
     def test_joint_names_concatenated_in_arm_order(self, two_arm_group):
         assert two_arm_group.joint_names == [
-            "left_j0", "left_j1", "right_j0", "right_j1",
+            "left_j0",
+            "left_j1",
+            "right_j0",
+            "right_j1",
         ]
 
     def test_kinematic_limits_concatenated(self, two_arm_group):
@@ -393,7 +426,8 @@ class TestStateQueries:
         left.env = None
         right.env = None
         config = ArmGroupConfig(
-            name="g", entity_type="arm_group",
+            name="g",
+            entity_type="arm_group",
             joint_names=left.config.joint_names + right.config.joint_names,
         )
         group = ArmGroup({"left": left, "right": right}, config)
@@ -405,7 +439,8 @@ class TestStateQueries:
         left = make_arm("left", 1, env=shared_env)
         right = make_arm("right", 1, env=shared_env)
         config = ArmGroupConfig(
-            name="g", entity_type="arm_group",
+            name="g",
+            entity_type="arm_group",
             joint_names=left.config.joint_names + right.config.joint_names,
         )
         group = ArmGroup({"left": left, "right": right}, config)
@@ -415,7 +450,8 @@ class TestStateQueries:
         left = make_arm("left", 1)
         right = make_arm("right", 1)
         config = ArmGroupConfig(
-            name="g", entity_type="arm_group",
+            name="g",
+            entity_type="arm_group",
             joint_names=left.config.joint_names + right.config.joint_names,
         )
         group = ArmGroup({"left": left, "right": right}, config)
@@ -429,7 +465,8 @@ class TestStateQueries:
         left = make_arm("left", 1, grasp_manager=object())
         right = make_arm("right", 1, grasp_manager=object())
         config = ArmGroupConfig(
-            name="g", entity_type="arm_group",
+            name="g",
+            entity_type="arm_group",
             joint_names=left.config.joint_names + right.config.joint_names,
         )
         group = ArmGroup({"left": left, "right": right}, config)
@@ -476,8 +513,10 @@ class TestCombinedGoalsForFrame:
         planner = FakePlanner(FakeCollision())
         with pytest.raises(ValueError, match="unknown arm"):
             two_arm_group._combined_goals_for_frame(
-                {"center": "X"}, two_arm_group.get_joint_positions(),
-                lambda arm, target, q_ref: [np.zeros(arm.dof)], planner,
+                {"center": "X"},
+                two_arm_group.get_joint_positions(),
+                lambda arm, target, q_ref: [np.zeros(arm.dof)],
+                planner,
             )
 
     def test_unnamed_arm_holds_at_running_config(self, two_arm_group):
@@ -488,7 +527,10 @@ class TestCombinedGoalsForFrame:
             return [np.array([target, target])]
 
         goals = two_arm_group._combined_goals_for_frame(
-            {"right": 5.0}, q_start, resolve, planner,
+            {"right": 5.0},
+            q_start,
+            resolve,
+            planner,
         )
         assert goals is not None
         assert len(goals) == 1
@@ -497,8 +539,10 @@ class TestCombinedGoalsForFrame:
     def test_no_candidates_for_named_arm_returns_none(self, two_arm_group):
         planner = FakePlanner(FakeCollision())
         goals = two_arm_group._combined_goals_for_frame(
-            {"left": "unreachable"}, two_arm_group.get_joint_positions(),
-            lambda arm, target, q_ref: [], planner,
+            {"left": "unreachable"},
+            two_arm_group.get_joint_positions(),
+            lambda arm, target, q_ref: [],
+            planner,
         )
         assert goals is None
 
@@ -517,8 +561,10 @@ class TestCombinedGoalsForFrame:
             return [np.array([1.0, 1.0]), np.array([3.0, 3.0])]
 
         goals = two_arm_group._combined_goals_for_frame(
-            {"left": "L", "right": "R"}, two_arm_group.get_joint_positions(),
-            resolve, planner,
+            {"left": "L", "right": "R"},
+            two_arm_group.get_joint_positions(),
+            resolve,
+            planner,
         )
         assert goals is not None
         # (left=1, right=1) is rejected (1==1); the other three survive.
@@ -530,7 +576,8 @@ class TestCombinedGoalsForFrame:
         left = make_arm("left", 1)
         right = make_arm("right", 1)
         config = ArmGroupConfig(
-            name="g", entity_type="arm_group",
+            name="g",
+            entity_type="arm_group",
             joint_names=left.config.joint_names + right.config.joint_names,
             max_bimanual_IK_solutions=2,
         )
@@ -542,7 +589,10 @@ class TestCombinedGoalsForFrame:
             return [np.array([float(i)]) for i in range(5)]
 
         goals = group._combined_goals_for_frame(
-            {"left": "L", "right": "R"}, group.get_joint_positions(), resolve, planner,
+            {"left": "L", "right": "R"},
+            group.get_joint_positions(),
+            resolve,
+            planner,
         )
         assert len(goals) == 2
 
@@ -553,8 +603,10 @@ class TestCombinedGoalsForFrame:
             return [np.zeros(arm.dof)]
 
         goals = two_arm_group._combined_goals_for_frame(
-            {"left": "L", "right": "R"}, two_arm_group.get_joint_positions(),
-            resolve, planner,
+            {"left": "L", "right": "R"},
+            two_arm_group.get_joint_positions(),
+            resolve,
+            planner,
         )
         assert goals is None
 
@@ -566,19 +618,16 @@ class TestCombinedGoalsForFrame:
 
 class TestPlanFrameSequence:
     def test_constraint_tsrs_not_implemented(self, two_arm_group, monkeypatch):
-        monkeypatch.setattr(
-            two_arm_group, "create_planner", lambda config=None: FakePlanner(FakeCollision())
-        )
+        monkeypatch.setattr(two_arm_group, "create_planner", lambda config=None: FakePlanner(FakeCollision()))
         with pytest.raises(NotImplementedError):
             two_arm_group._plan_frame_sequence(
-                {"left": "L"}, lambda arm, t, q: [np.zeros(arm.dof)],
+                {"left": "L"},
+                lambda arm, t, q: [np.zeros(arm.dof)],
                 constraint_tsrs=["fake_tsr"],
             )
 
     def test_empty_targets_returns_none(self, two_arm_group, monkeypatch):
-        monkeypatch.setattr(
-            two_arm_group, "create_planner", lambda config=None: FakePlanner(FakeCollision())
-        )
+        monkeypatch.setattr(two_arm_group, "create_planner", lambda config=None: FakePlanner(FakeCollision()))
         assert two_arm_group._plan_frame_sequence({}, lambda a, t, q: [q]) is None
 
     def test_single_frame_success_returns_full_path(self, two_arm_group, monkeypatch):
@@ -636,7 +685,8 @@ class TestPlanFrameSequence:
             return [np.full(arm.dof, target)]
 
         path = two_arm_group._plan_frame_sequence(
-            {"left": [1.0], "right": [0.0, 2.0]}, resolve,
+            {"left": [1.0], "right": [0.0, 2.0]},
+            resolve,
         )
         assert path is not None
         # start + seg0's non-duplicate tail + seg1's non-duplicate tail
@@ -644,9 +694,11 @@ class TestPlanFrameSequence:
         np.testing.assert_array_equal(path[-1], [1.0, 1.0, 2.0, 2.0])
         assert len(planner.plan_calls) == 2
 
+
 # =============================================================================
 # test planner failure handling through the public API
 # =============================================================================
+
 
 class TestPublicPlanningAPIFailureHandling:
     """Planner exceptions raised inside .plan() surface as None through
@@ -663,9 +715,7 @@ class TestPublicPlanningAPIFailureHandling:
         assert two_arm_group.plan_to_configuration(goal) is None
 
     def test_plan_to_configuration_returns_none_on_value_error(self, two_arm_group, monkeypatch):
-        planner = FakePlanner(
-            FakeCollision(), raise_on_call={0: ValueError("No valid start configurations available")}
-        )
+        planner = FakePlanner(FakeCollision(), raise_on_call={0: ValueError("No valid start configurations available")})
         monkeypatch.setattr(two_arm_group, "create_planner", lambda config=None: planner)
 
         goal = {"left": np.array([0.5, 0.5]), "right": np.array([0.6, 0.6])}
@@ -819,7 +869,10 @@ class TestMakePlannerConfig:
 
     def test_abort_fn_wired_through(self, two_arm_group, monkeypatch):
         monkeypatch.setattr(two_arm_group, "_detect_angular_joints", lambda: None)
-        fn = lambda: False
+
+        def fn():
+            return False
+
         cfg = two_arm_group._make_planner_config(timeout=None, planner_config=None, abort_fn=fn)
         assert cfg.abort_fn is fn
 
@@ -827,8 +880,11 @@ class TestMakePlannerConfig:
         from pycbirrt import CBiRRTConfig
 
         explicit = CBiRRTConfig(
-            timeout=99.0, max_iterations=1, step_size=0.01,
-            goal_bias=0.9, smoothing_iterations=0,
+            timeout=99.0,
+            max_iterations=1,
+            step_size=0.01,
+            goal_bias=0.9,
+            smoothing_iterations=0,
         )
         cfg = two_arm_group._make_planner_config(timeout=None, planner_config=explicit)
         assert cfg is explicit
@@ -837,8 +893,11 @@ class TestMakePlannerConfig:
         from pycbirrt import CBiRRTConfig
 
         explicit = CBiRRTConfig(
-            timeout=99.0, max_iterations=1, step_size=0.01,
-            goal_bias=0.9, smoothing_iterations=0,
+            timeout=99.0,
+            max_iterations=1,
+            step_size=0.01,
+            goal_bias=0.9,
+            smoothing_iterations=0,
         )
         cfg = two_arm_group._make_planner_config(timeout=5.0, planner_config=explicit)
         assert cfg is not explicit  # dataclasses.replace returns a new instance
@@ -881,7 +940,8 @@ class TestDetectAngularJoints:
 class TestCheckCollisions:
     def test_unknown_arm_name_raises(self, two_arm_group, monkeypatch):
         monkeypatch.setattr(
-            two_arm_group, "create_planner",
+            two_arm_group,
+            "create_planner",
             lambda config=None, **kw: FakePlanner(FakeCollision()),
         )
         with pytest.raises(ValueError, match="not found in this group"):
@@ -889,7 +949,8 @@ class TestCheckCollisions:
 
     def test_no_contacts_returns_empty_list(self, two_arm_group, monkeypatch):
         monkeypatch.setattr(
-            two_arm_group, "create_planner",
+            two_arm_group,
+            "create_planner",
             lambda config=None, **kw: FakePlanner(FakeCollision()),
         )
         result = two_arm_group.check_collisions()
@@ -897,7 +958,7 @@ class TestCheckCollisions:
 
 
 # =============================================================================
-# retime 
+# retime
 # =============================================================================
 
 
@@ -909,9 +970,7 @@ class TestRetime:
             captured.update(kwargs)
             return "TRAJECTORY_SENTINEL"
 
-        monkeypatch.setattr(
-            "mj_manipulator.arm_group.Trajectory.from_path", staticmethod(fake_from_path)
-        )
+        monkeypatch.setattr("mj_manipulator.arm_group.Trajectory.from_path", staticmethod(fake_from_path))
         path = [np.zeros(4), np.ones(4)]
         result = two_arm_group.retime(path)
 

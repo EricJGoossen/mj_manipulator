@@ -237,3 +237,69 @@ class TestDebugContacts:
         gm = GraspManager(model, data)
         cc = CollisionChecker(model, data, joint_names, grasp_manager=gm)
         cc.debug_contacts(np.zeros(2))  # Should print, not raise
+
+
+def _place_mug(model, data, pos):
+    """Move the free-floating mug to ``pos`` (world frame)."""
+    jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "mug_free")
+    adr = model.jnt_qposadr[jid]
+    data.qpos[adr : adr + 3] = pos
+    data.qpos[adr + 3 : adr + 7] = [1, 0, 0, 0]
+    mujoco.mj_forward(model, data)
+
+
+class TestCollisionMargin:
+    """margin_mm turns near misses into collisions without touching the shared model."""
+
+    # Mug beside link2 at q=0: capsule radius 0.04 + cylinder radius 0.03,
+    # centers 0.073 m apart in y -> a 3 mm gap.
+    NEAR_MISS = [0.45, 0.073, 0.5]
+
+    def test_near_miss_is_valid_without_margin(self, model_and_data, joint_names):
+        model, data = model_and_data
+        _place_mug(model, data, self.NEAR_MISS)
+        cc = CollisionChecker(model, data, joint_names)
+        assert cc.is_valid(np.zeros(2))
+
+    def test_near_miss_is_invalid_inside_margin(self, model_and_data, joint_names):
+        model, data = model_and_data
+        _place_mug(model, data, self.NEAR_MISS)
+        cc = CollisionChecker(model, data, joint_names, margin_mm=5.0)
+        assert not cc.is_valid(np.zeros(2))
+
+    def test_gap_beyond_margin_stays_valid(self, model_and_data, joint_names):
+        model, data = model_and_data
+        _place_mug(model, data, self.NEAR_MISS)
+        cc = CollisionChecker(model, data, joint_names, margin_mm=1.0)
+        assert cc.is_valid(np.zeros(2))
+
+    def test_shared_model_is_not_mutated(self, model_and_data, joint_names):
+        model, data = model_and_data
+        before = model.geom_margin.copy()
+        CollisionChecker(model, data, joint_names, margin_mm=5.0)
+        np.testing.assert_array_equal(model.geom_margin, before)
+
+
+class TestBodyIdsForJoints:
+    """body_ids_for_joints returns each joint's body and its descendants."""
+
+    def _ids(self, model, *names):
+        return {mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, n) for n in names}
+
+    def test_joint_includes_descendants(self, model_and_data, joint_names):
+        model, data = model_and_data
+        cc = CollisionChecker(model, data, joint_names)
+        expected = self._ids(model, "link2", "gripper/base", "gripper/left_finger", "gripper/right_finger")
+        assert cc.body_ids_for_joints(["joint2"]) == expected
+
+    def test_extra_bodies_are_added(self, model_and_data, joint_names):
+        model, data = model_and_data
+        cc = CollisionChecker(model, data, joint_names)
+        ids = cc.body_ids_for_joints(["joint2"], ["mug"])
+        assert self._ids(model, "mug") <= ids
+
+    def test_unknown_joint_raises(self, model_and_data, joint_names):
+        model, data = model_and_data
+        cc = CollisionChecker(model, data, joint_names)
+        with pytest.raises(ValueError, match="not found"):
+            cc.body_ids_for_joints(["no_such_joint"])

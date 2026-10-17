@@ -1,11 +1,31 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Siddhartha Srinivasa
+
+"""Plan and act on several arms as one combined kinematic chain.
+
+An ArmGroup concatenates the joints of its arms (in insertion order) and
+plans in that combined joint space, so cross-arm collisions are checked at
+every step:
+
+- Planning: ``plan_to_configuration``, ``plan_to_poses``, ``plan_to_tsrs``
+  and ``plan_cartesian_path`` each take a per-arm goal (``{arm_name: goal}``).
+  Arms left out of the goal hold where they are.
+- Retiming: ``retime`` time-parameterizes a combined path and checks the
+  retimed trajectory for collisions; ``Trajectory.split_trajectory`` turns
+  it back into per-arm trajectories.
+- State: joint positions, limits and kinematic limits concatenated across
+  arms, and ``Mapping`` access to the arms themselves (``group["left"]``).
+
+A single-arm group is valid and is how one arm is planned for.
+"""
+
 from __future__ import annotations
 
 import dataclasses
 import itertools
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
 from typing import TYPE_CHECKING
-from collections.abc import Iterator, Mapping
 
 import mujoco
 import numpy as np
@@ -13,24 +33,27 @@ from pycbirrt import CBiRRT, CBiRRTConfig
 from pycbirrt.exceptions import PlanningError
 from tsr import TSR
 
+from mj_manipulator.arm import read_site_pose as read_single_site_pose
 from mj_manipulator.collision import CollisionChecker
 from mj_manipulator.config import ArmGroupConfig, KinematicLimits
 from mj_manipulator.trajectory import Trajectory
-from mj_manipulator.arm import read_site_pose as read_single_site_pose
 
 if TYPE_CHECKING:
     from mj_environment import Environment
 
-    from mj_manipulator.grasp_manager import GraspManager
     from mj_manipulator.arm import Arm
+    from mj_manipulator.grasp_manager import GraspManager
 
 logger = logging.getLogger(__name__)
+
 
 class ContextRobotModel:
     """Thread-safe RobotModel adapter using isolated MjData.
 
     Each instance owns a private MjData copy for FK computation.
-    Created by Arm.create_planner() for parallel planning.
+    Created by ArmGroup.create_planner() for parallel planning.
+    forward_kinematics() returns one 4x4 pose per site, or a single pose
+    when there is only one.
     """
 
     def __init__(
@@ -39,7 +62,7 @@ class ContextRobotModel:
         data: mujoco.MjData,
         joint_qpos_indices: list[int],
         ee_site_id_group: list[int],
-        joint_limits: tuple[np.ndarray, np.ndarray],    
+        joint_limits: tuple[np.ndarray, np.ndarray],
         tcp_offset_group: list[np.ndarray] | None = None,
     ):
         self._model = model
@@ -65,6 +88,7 @@ class ContextRobotModel:
         poses = _read_site_pose(self._data, self.ee_site_id_group, self.tcp_offset_group)
         return poses[0] if len(poses) == 1 else poses
 
+
 # =============================================================================
 # Helpers
 # =============================================================================
@@ -77,19 +101,29 @@ def _read_site_pose(
 ) -> list[np.ndarray]:
     """Read a 4x4 pose from a MuJoCo site, optionally applying tcp_offset."""
     return [
-        read_single_site_pose(
-            data, 
-            site_id, 
-            tcp_offset_group[i] if tcp_offset_group is not None else None
-        )
+        read_single_site_pose(data, site_id, tcp_offset_group[i] if tcp_offset_group is not None else None)
         for i, site_id in enumerate(ee_site_id_group)
     ]
+
 
 # =============================================================================
 # Arm group
 # =============================================================================
 
+
 class ArmGroup(Mapping):
+    """Several arms in one environment, planned as one combined chain.
+
+    Args:
+        arms: Arms keyed by name. Insertion order sets the order of the
+            combined joint vector.
+        config: Group configuration. ``config.joint_names`` must equal the
+            arms' joint names concatenated in that order.
+
+    Raises:
+        ValueError: ``config.joint_names`` does not match the arms.
+    """
+
     arms: dict[str, Arm]
     dof: int
     config: ArmGroupConfig
@@ -110,10 +144,7 @@ class ArmGroup(Mapping):
 
         self.dof = sum(arm.dof for arm in arms.values())
         if list(self.joint_names) != list(config.joint_names):
-            raise ValueError(
-                "ArmGroup joint_names mismatch: "
-                f"config={config.joint_names}, arms={self.joint_names}"
-            )
+            raise ValueError(f"ArmGroup joint_names mismatch: config={config.joint_names}, arms={self.joint_names}")
 
     def _split_by_arm(self, q: np.ndarray) -> dict[str, np.ndarray]:
         """Split a joint position array into per-arm arrays."""
@@ -176,7 +207,7 @@ class ArmGroup(Mapping):
     def ee_site_id_group(self) -> list[int]:
         """List of site IDs for all arms in this group."""
         return [arm.ee_site_id for arm in self.arms.values()]
-    
+
     @property
     def tcp_offset_group(self) -> list[np.ndarray | None]:
         """List of TCP offsets for all arms in this group."""
@@ -223,8 +254,8 @@ class ArmGroup(Mapping):
             arm.set_joint_positions(q_by_arm[name], ctx=ctx)
 
     def get_joint_velocities(self) -> np.ndarray:
-            """Current joint velocities (rad/s)."""
-            return np.concatenate([arm.get_joint_velocities() for arm in self.arms.values()])
+        """Current joint velocities (rad/s)."""
+        return np.concatenate([arm.get_joint_velocities() for arm in self.arms.values()])
 
     def get_ee_pose(self) -> list[np.ndarray]:
         """Current end-effector pose as 4x4 homogeneous transform.
@@ -313,13 +344,8 @@ class ArmGroup(Mapping):
 
         if arm_name is not None:
             arm = self.arms[arm_name]
-            body_ids = collision_checker.body_ids_for_joints(
-                arm.config.joint_names, arm.config.extra_arm_body_names
-            )
-            body_names = {
-                mujoco.mj_id2name(collision_checker.model, mujoco.mjtObj.mjOBJ_BODY, bid)
-                for bid in body_ids
-            }
+            body_ids = collision_checker.body_ids_for_joints(arm.config.joint_names, arm.config.extra_arm_body_names)
+            body_names = {mujoco.mj_id2name(collision_checker.model, mujoco.mjtObj.mjOBJ_BODY, bid) for bid in body_ids}
             contacts = [(b1, b2, d) for b1, b2, d in contacts if b1 in body_names or b2 in body_names]
             label = arm_name
 
@@ -404,9 +430,7 @@ class ArmGroup(Mapping):
         extra_bodies = self.extra_arm_body_names
         margin_mm = self.config.planning_defaults.collision_margin_mm
         if self.grasp_manager is not None:
-            grasped_objects = frozenset(
-                (obj, arm) for obj, arm in self.grasp_manager.grasped.items()
-            )
+            grasped_objects = frozenset((obj, arm) for obj, arm in self.grasp_manager.grasped.items())
             attachments = {
                 obj: att for obj, att in self.grasp_manager._attachments.items() if obj in dict(grasped_objects)
             }
@@ -468,7 +492,6 @@ class ArmGroup(Mapping):
                 rng = self.env.model.jnt_range[jid]
                 angular.append((rng[1] - rng[0]) > 2 * np.pi * 1.5)
         return tuple(angular) if any(angular) else None
-
 
     def retime(
         self,
@@ -599,9 +622,7 @@ class ArmGroup(Mapping):
 
         for name in waypoints:
             if self.arms[name].ik_solver is None:
-                raise RuntimeError(
-                    f"plan_cartesian_path requires an arm with an IK solver: arm '{name}' has none"
-                )
+                raise RuntimeError(f"plan_cartesian_path requires an arm with an IK solver: arm '{name}' has none")
 
         arm_order = list(self.arms.keys())
         q_current = self.get_joint_positions().copy() if q_start is None else np.asarray(q_start, dtype=float).copy()
@@ -626,7 +647,9 @@ class ArmGroup(Mapping):
 
                 pose = np.asarray(waypoints[name][i], dtype=float)
                 if pose.shape != (4, 4):
-                    raise ValueError(f"plan_cartesian_path: arm '{name}' waypoint {i} has shape {pose.shape}, expected (4, 4)")
+                    raise ValueError(
+                        f"plan_cartesian_path: arm '{name}' waypoint {i} has shape {pose.shape}, expected (4, 4)"
+                    )
 
                 ik_kwargs = {"q_init": q_cur_arm}
                 locked_idx = getattr(arm.ik_solver, "fixed_joint_index", None)
@@ -663,7 +686,8 @@ class ArmGroup(Mapping):
                 if partial_ok and i > 0:
                     logger.info(
                         "plan_cartesian_path: %s; returning partial trajectory for %d feasible waypoint(s)",
-                        infeasible_reason, i,
+                        infeasible_reason,
+                        i,
                     )
                     break
                 raise ValueError(f"plan_cartesian_path: {infeasible_reason}")
@@ -690,28 +714,20 @@ class ArmGroup(Mapping):
         """
         if not targets:
             return []
-        norm = {
-            name: (list(v) if isinstance(v, (list, tuple)) else [v])
-            for name, v in targets.items()
-        }
+        norm = {name: (list(v) if isinstance(v, (list, tuple)) else [v]) for name, v in targets.items()}
         lengths = {len(v) for v in norm.values()}
         n = max(lengths)
         bad = lengths - {1, n}
         if bad:
             detail = ", ".join(f"{k}: {len(v)}" for k, v in norm.items())
-            raise ValueError(
-                f"per-arm trajectory lengths must all be 1 (broadcast) or {n}; got {{{detail}}}"
-            )
-        return [
-            {name: (v[i] if len(v) > 1 else v[0]) for name, v in norm.items()}
-            for i in range(n)
-        ]
+            raise ValueError(f"per-arm trajectory lengths must all be 1 (broadcast) or {n}; got {{{detail}}}")
+        return [{name: (v[i] if len(v) > 1 else v[0]) for name, v in norm.items()} for i in range(n)]
 
     def _combined_goals_for_frame(
         self,
         frame: dict,
         q_start: np.ndarray,
-        resolve_candidates: Callable,   # (arm, target, q_ref) -> list[np.ndarray]
+        resolve_candidates: Callable,  # (arm, target, q_ref) -> list[np.ndarray]
         planner: CBiRRT,
     ) -> list[np.ndarray] | None:
         """Resolve one frame into collision-valid COMBINED goal configs.
@@ -816,7 +832,7 @@ class ArmGroup(Mapping):
     def _pose_candidates(self, arm, pose, q_ref) -> list[np.ndarray]:
         if arm.ik_solver is None:
             raise RuntimeError(f"pose planning requires an IK solver on arm '{arm.config.name}'")
-        sols = arm.ik_solver.solve_valid(pose) 
+        sols = arm.ik_solver.solve_valid(pose)
         if not sols:
             return []
         sols = sorted(sols, key=lambda q: float(np.linalg.norm(q - q_ref)))
@@ -853,9 +869,13 @@ class ArmGroup(Mapping):
         pass through in order. Unnamed arms hold at their current config.
         """
         return self._plan_frame_sequence(
-            goal, self._config_candidates,
-            constraint_tsrs=constraint_tsrs, timeout=timeout,
-            seed=seed, planner_config=planner_config, abort_fn=abort_fn,
+            goal,
+            self._config_candidates,
+            constraint_tsrs=constraint_tsrs,
+            timeout=timeout,
+            seed=seed,
+            planner_config=planner_config,
+            abort_fn=abort_fn,
         )
 
     def plan_to_poses(
@@ -876,9 +896,13 @@ class ArmGroup(Mapping):
         for cross-arm collision at each frame. Unnamed arms hold.
         """
         return self._plan_frame_sequence(
-            goal, self._pose_candidates,
-            constraint_tsrs=constraint_tsrs, timeout=timeout,
-            seed=seed, planner_config=planner_config, abort_fn=abort_fn,
+            goal,
+            self._pose_candidates,
+            constraint_tsrs=constraint_tsrs,
+            timeout=timeout,
+            seed=seed,
+            planner_config=planner_config,
+            abort_fn=abort_fn,
             partial_ok=partial_ok,
         )
 
@@ -900,12 +924,20 @@ class ArmGroup(Mapping):
         per-arm candidates. Unnamed arms hold. Note: a list is a SEQUENCE of
         waypoints, not a union of candidates (unlike Arm.plan_to_tsrs).
         """
-        resolver = lambda arm, tsr, q_ref: self._tsr_candidates(arm, tsr, q_ref, samples=samples)
+
+        def resolver(arm, tsr, q_ref):
+            return self._tsr_candidates(arm, tsr, q_ref, samples=samples)
+
         return self._plan_frame_sequence(
-            goal, resolver,
-            constraint_tsrs=constraint_tsrs, timeout=timeout,
-            seed=seed, planner_config=planner_config, abort_fn=abort_fn,
+            goal,
+            resolver,
+            constraint_tsrs=constraint_tsrs,
+            timeout=timeout,
+            seed=seed,
+            planner_config=planner_config,
+            abort_fn=abort_fn,
         )
+
 
 class _NoIKSolver:
     """Stub IK solver that returns no solutions.

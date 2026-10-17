@@ -73,6 +73,41 @@ All methods accept optional `constraint_tsrs` for trajectory-wide path constrain
 
 Any path can be time-parameterized with `arm.retime(path)`, which uses TOPP-RA with the arm's kinematic limits.
 
+## Multi-Arm Planning
+
+`ArmGroup` plans one or more arms in an environment as one combined chain, so the arms are collision-checked against each other at every step. Goals are keyed by arm name; arms left out of a goal hold where they are. A single arm is planned for as a one-arm group.
+
+```python
+from mj_manipulator import ArmGroup, PlanGroupResult
+from mj_manipulator.config import ArmGroupConfig
+
+group = ArmGroup(
+    {"left": left_arm, "right": right_arm},
+    ArmGroupConfig(
+        name="bimanual",
+        entity_type="arm_group",
+        joint_names=left_arm.config.joint_names + right_arm.config.joint_names,
+    ),
+)
+
+path = group.plan_to_poses({"left": left_pose, "right": right_pose})
+traj = group.retime(path)  # one combined trajectory, collision-checked after retiming
+ctx.execute(PlanGroupResult.from_trajectories(traj.split_trajectory(group)))
+```
+
+| Method | Goal for each named arm |
+|---|---|
+| `plan_to_configuration(goal)` | Joint config, or a list of configs to pass through in order |
+| `plan_to_poses(goal)` | EE pose, or a list in order — IK per arm, combinations collision-checked together |
+| `plan_to_tsrs(goal, samples=8)` | TSR, or a list in order — each TSR sampled and solved with IK |
+| `plan_cartesian_path(waypoints)` | SE(3) waypoints; all arms step through them in lockstep |
+
+A list is a **sequence** of waypoints, not a union of alternatives. Path constraints (`constraint_tsrs`) are not supported yet.
+
+`PlanningDefaults.collision_margin_mm` (default 5 mm) is a safety standoff: planning and retiming treat geometry closer than the margin as colliding. Set it to 0 to check overlap only.
+
+`ctx.execute(PlanGroupResult)` runs every arm's trajectory at the same time, so the per-arm trajectories must share timestamps (`split_trajectory` guarantees this). `safe_retract(group, ...)` retracts every arm in lockstep, and `group.check_collisions(arm_name)` reports contacts for one arm or for the whole group.
+
 ## IK Solver
 
 Uses [EAIK](https://github.com/Jonte-Raab/EAIK) for analytical inverse kinematics. The `MuJoCoEAIKSolver` extracts joint axes (H) and position offsets (P) directly from the MuJoCo model — no DH parameters or frame calibration needed.
@@ -97,13 +132,14 @@ controller = CartesianController.from_arm(arm)
 
 # Teleop: call from your 125 Hz control loop
 result = controller.step(twist=np.array([0.05, 0, 0, 0, 0, 0]), dt=0.008)
-print(result.achieved_fraction)   # 1.0 = full twist achieved
-print(result.limiting_factor)     # None / "joint_limit" / "velocity"
+print(result.achieved_fraction)  # 1.0 = full twist achieved
+print(result.limiting_factor)  # None / "joint_limit" / "velocity"
 
 # Small Cartesian plans: approach 5 cm along -z, stop on contact
 result = controller.move(
     twist=np.array([0, 0, -0.05, 0, 0, 0]),
-    dt=0.008, max_distance=0.05,
+    dt=0.008,
+    max_distance=0.05,
     stop_condition=lambda: checker.is_arm_in_collision(),
 )
 
@@ -128,7 +164,7 @@ grasp_manager.attach_object("can_0", "gripper/right_pad")
 
 # Collision checker uses grasp state automatically:
 checker = CollisionChecker(model, data, joint_names, grasp_manager=grasp_manager)
-checker.is_valid(q)   # allows gripper↔can; rejects arm↔can, can↔env
+checker.is_valid(q)  # allows gripper↔can; rejects arm↔can, can↔env
 ```
 
 See [docs/grasp-aware-collision.md](docs/grasp-aware-collision.md) for the filtering logic, live vs snapshot modes for parallel planning, and the complete grasp lifecycle.
@@ -171,7 +207,7 @@ controller.set_target_twist(np.array([0.05, 0, 0, 0, 0, 0]))  # CartesianControl
 state = controller.step()  # TRACKING, TRACKING_COLLISION, UNREACHABLE, or IDLE
 
 # Safety modes
-controller.safety_mode = SafetyMode.ALLOW   # move + flag collisions (default)
+controller.safety_mode = SafetyMode.ALLOW  # move + flag collisions (default)
 controller.safety_mode = SafetyMode.REJECT  # block colliding configs (real robot)
 
 # Recording for ML data collection
@@ -189,7 +225,8 @@ mj_environment  →  mj_manipulator  →  geodude (UR5e + Robotiq)
                         │
                         ├── arms/          Arm factories + EAIK IK solver
                         ├── arm.py         Generic Arm class
-                        ├── config.py      ArmConfig, KinematicLimits, PlanningDefaults
+                        ├── arm_group.py   ArmGroup: planning for one or more arms as one chain
+                        ├── config.py      ArmConfig, ArmGroupConfig, KinematicLimits, PlanningDefaults
                         ├── protocols.py   IKSolver, Gripper, ExecutionContext contracts
                         ├── collision.py   Collision checking
                         ├── trajectory.py  Trajectory + TOPP-RA retiming
@@ -249,15 +286,16 @@ If the model doesn't have a named site on the tip body, add one via `MjSpec` bef
 ```python
 import mujoco
 
+
 def add_my_robot_ee_site(spec: mujoco.MjSpec, site_name: str = "grasp_site") -> None:
     # Use spec.body(name) — it walks the whole tree. worldbody.find_child
     # only searches direct children and misses deeply-nested tip bodies.
-    tip = spec.body("link7")   # adjust for your tip body name
+    tip = spec.body("link7")  # adjust for your tip body name
     if tip is None:
         raise RuntimeError(f"No body named 'link7' in this spec")
     site = tip.add_site()
     site.name = site_name
-    site.pos = [0.0, 0.0, 0.0]   # at flange; adjust if you want a TCP offset
+    site.pos = [0.0, 0.0, 0.0]  # at flange; adjust if you want a TCP offset
 ```
 
 See `add_franka_ee_site()` or `add_iiwa14_ee_site()` for full examples.
@@ -274,16 +312,16 @@ import numpy as np
 
 # Create a bare config just to extract H/P
 config = ArmConfig(
-    name="my_robot", entity_type="arm",
+    name="my_robot",
+    entity_type="arm",
     joint_names=MY_ROBOT_JOINT_NAMES,
     kinematic_limits=KinematicLimits(velocity=np.ones(7), acceleration=np.ones(7)),
     ee_site="grasp_site",
 )
 arm = Arm(env, config)  # no IK yet
 first_joint_body = env.model.jnt_bodyid[arm.joint_ids[0]]
-base_body_id     = env.model.body_parentid[first_joint_body]
-H, P, _ = _extract_hp(env.model, env.data, list(arm.joint_ids),
-                      arm.joint_qpos_indices, arm.ee_site_id, base_body_id)
+base_body_id = env.model.body_parentid[first_joint_body]
+H, P, _ = _extract_hp(env.model, env.data, list(arm.joint_ids), arm.joint_qpos_indices, arm.ee_site_id, base_body_id)
 print(find_locked_joint_index(H, P))
 ```
 
@@ -301,22 +339,23 @@ from mj_manipulator.arms.eaik_solver import MuJoCoEAIKSolver
 from mj_manipulator.config import ArmConfig, KinematicLimits
 
 MY_ROBOT_JOINT_NAMES = ["joint1", "joint2", ...]
-MY_ROBOT_HOME        = np.array([0.0, 0.0, ...])
-MY_ROBOT_VEL_LIMITS  = np.array([...]) * 0.5   # datasheet values, halved
-MY_ROBOT_ACC_LIMITS  = np.array([...]) * 0.5
+MY_ROBOT_HOME = np.array([0.0, 0.0, ...])
+MY_ROBOT_VEL_LIMITS = np.array([...]) * 0.5  # datasheet values, halved
+MY_ROBOT_ACC_LIMITS = np.array([...]) * 0.5
 _MY_ROBOT_LOCKED_JOINT = 0  # from step 2 (7-DOF only; omit for 6-DOF)
 
 
 def add_my_robot_gravcomp(spec):
     """Enable gravity compensation on the arm's kinematic subtree."""
     from mj_manipulator.arm import add_subtree_gravcomp
-    add_subtree_gravcomp(spec, "base")   # adjust root body name
+
+    add_subtree_gravcomp(spec, "base")  # adjust root body name
 
 
-def create_my_robot_arm(env, *, ee_site="grasp_site", with_ik=True,
-                       tcp_offset=None, gripper=None, grasp_manager=None):
+def create_my_robot_arm(env, *, ee_site="grasp_site", with_ik=True, tcp_offset=None, gripper=None, grasp_manager=None):
     config = ArmConfig(
-        name="my_robot", entity_type="arm",
+        name="my_robot",
+        entity_type="arm",
         joint_names=list(MY_ROBOT_JOINT_NAMES),
         kinematic_limits=KinematicLimits(
             velocity=MY_ROBOT_VEL_LIMITS.copy(),
@@ -332,13 +371,14 @@ def create_my_robot_arm(env, *, ee_site="grasp_site", with_ik=True,
     first_joint_body = env.model.jnt_bodyid[arm.joint_ids[0]]
     base_body_id = env.model.body_parentid[first_joint_body]
     ik_solver = MuJoCoEAIKSolver(
-        model=env.model, data=env.data,
+        model=env.model,
+        data=env.data,
         joint_ids=list(arm.joint_ids),
         joint_qpos_indices=arm.joint_qpos_indices,
         ee_site_id=arm.ee_site_id,
         base_body_id=base_body_id,
         joint_limits=arm.get_joint_limits(),
-        fixed_joint_index=_MY_ROBOT_LOCKED_JOINT,   # 7-DOF only
+        fixed_joint_index=_MY_ROBOT_LOCKED_JOINT,  # 7-DOF only
     )
     return Arm(env, config, ik_solver=ik_solver, gripper=gripper, grasp_manager=grasp_manager)
 ```
@@ -446,8 +486,8 @@ Add a class to `tsr/src/tsr/hands/parallel_jaw.py`:
 class MyGripper(ParallelJawGripper):
     """One-line description with the XML source."""
 
-    FINGER_LENGTH = 0.059   # meters, palm → fingertip pad center
-    MAX_APERTURE = 0.085    # meters, pad INNER face ↔ inner face at full open
+    FINGER_LENGTH = 0.059  # meters, palm → fingertip pad center
+    MAX_APERTURE = 0.085  # meters, pad INNER face ↔ inner face at full open
 
     # Distance from the gripper's mounting-body origin to the TSR palm
     # along the approach axis. Callers placing a grasp_site in an
@@ -480,11 +520,11 @@ In your setup module (e.g. `demos/my_robot_setup.py`), after loading the gripper
 from tsr.hands import MyGripper
 
 gripper_spec = mujoco.MjSpec.from_file(str(gripper_xml))
-base = gripper_spec.body("base_mount")   # or "hand", etc.
+base = gripper_spec.body("base_mount")  # or "hand", etc.
 site = base.add_site()
 site.name = "grasp_site"
 site.pos = [0.0, 0.0, MyGripper.PALM_OFFSET_FROM_MOUNT]
-site.quat = [0.7071, 0.0, 0.0, -0.7071]   # -90° about z for Robotiq-style
+site.quat = [0.7071, 0.0, 0.0, -0.7071]  # -90° about z for Robotiq-style
 ```
 
 The rotation depends on the gripper's internal frame. Robotiq-family grippers in the menagerie have their fingers opening along the *x*-axis of `base_mount` — the −90° z-rotation maps TSR's expected +y opening axis to the gripper's actual +x. Franka's hand body already has z=approach, y=opening, so it needs identity rotation. When in doubt, open the viz (Step 1) — if the fingers don't visibly open along the "finger-opening" axis you expect, fix the rotation.
@@ -534,7 +574,7 @@ Two more menagerie quirks that bite in practice:
 
   ```python
   exclude = spec.add_exclude()
-  exclude.bodyname1 = "gripper/left_pad"     # or "gripper/left_finger"
+  exclude.bodyname1 = "gripper/left_pad"  # or "gripper/left_finger"
   exclude.bodyname2 = "gripper/right_pad"
   ```
 
@@ -600,10 +640,11 @@ A **scenario** is a Python module with a `scene = {...}` dict and optional user-
 """One-line description."""
 
 scene = {
-    "objects": {"can": 5},                                   # pool of graspable types
-    "fixtures": {"yellow_tote": [[-0.5, 0.0, 0.0]]},         # stationary objects
+    "objects": {"can": 5},  # pool of graspable types
+    "fixtures": {"yellow_tote": [[-0.5, 0.0, 0.0]]},  # stationary objects
     # "spawn_count": 3,                                       # optional: random subset
 }
+
 
 def sort_all(robot):
     while robot.pickup():

@@ -65,6 +65,7 @@ mj_manipulator/
     trajectory.py       # Trajectory + TOPP-RA + linear trajectory
     planning.py         # PlanResult dataclass
     arm.py              # Generic Arm (FK, IK, planning, execution)
+    arm_group.py        # ArmGroup: planning for one or more arms as one combined chain
     adapters.py         # pycbirrt RobotModel/IKSolver/CollisionChecker adapters
     collision.py        # Unified grasp-aware CollisionChecker
     grasp_manager.py    # GraspManager + find_contacted_object
@@ -86,13 +87,14 @@ mj_manipulator/
 ```python
 class ExecutionContext(Protocol):
     """Unified interface for robot execution (sim or real hardware)."""
+
     def execute(self, item: Trajectory | PlanResult) -> bool: ...
     def step(self, targets: dict[str, np.ndarray] | None = None) -> None: ...
-    def step_cartesian(self, arm_name: str, position: np.ndarray,
-                       velocity: np.ndarray | None = None) -> None: ...
+    def step_cartesian(self, arm_name: str, position: np.ndarray, velocity: np.ndarray | None = None) -> None: ...
     def sync(self) -> None: ...
     def is_running(self) -> bool: ...
     def arm(self, name: str) -> ArmController: ...
+
     control_dt: float  # property
 ```
 
@@ -101,6 +103,7 @@ class ExecutionContext(Protocol):
 ```python
 class ArmController(Protocol):
     """Combines gripper actuation with grasp-manager bookkeeping."""
+
     def grasp(self, object_name: str) -> str | None: ...
     def release(self, object_name: str | None = None) -> None: ...
 ```
@@ -112,9 +115,10 @@ The grasp/release methods handle the **full pipeline**: actuate gripper, detect 
 ```python
 class Gripper(Protocol):
     """Any gripper (Robotiq, Franka hand, suction, etc.)."""
+
     arm_name: str
     gripper_body_names: list[str]
-    attachment_body: str          # Body objects weld to during kinematic grasp
+    attachment_body: str  # Body objects weld to during kinematic grasp
     actuator_id: int | None
     ctrl_open: float
     ctrl_closed: float
@@ -122,8 +126,10 @@ class Gripper(Protocol):
     def kinematic_close(self, steps: int = 50) -> str | None: ...
     def kinematic_open(self) -> None: ...
     def get_actual_position(self) -> float: ...  # 0=open, 1=closed
+
     is_holding: bool
     held_object: str | None
+
     def set_candidate_objects(self, objects: list[str] | None) -> None: ...
 ```
 
@@ -132,13 +138,16 @@ class Gripper(Protocol):
 ```python
 class GraspSource(Protocol):
     """Provides grasps/placements for objects. Geodude's AffordanceRegistry implements this."""
+
     def get_grasps(self, object_name: str, hand_type: str) -> list[TSR]: ...
     def get_placements(self, destination: str, object_name: str) -> list[TSR]: ...
     def get_graspable_objects(self) -> list[str]: ...
     def get_place_destinations(self, object_name: str) -> list[str]: ...
 
+
 class IKSolver(Protocol):
     """Mirrors pycbirrt's IKSolver protocol."""
+
     def solve(self, pose, q_init=None) -> list[np.ndarray]: ...
     def solve_valid(self, pose, q_init=None) -> list[np.ndarray]: ...
 ```
@@ -192,12 +201,12 @@ Combined total: ~6,000 lines (vs 10,508 before). ~4,500 lines eliminated through
 class Arm:
     def __init__(
         self,
-        env: Environment,           # mj_environment — provides model, data, fork, sync
-        config: ArmConfig,          # joint names, EE site, limits, etc.
+        env: Environment,  # mj_environment — provides model, data, fork, sync
+        config: ArmConfig,  # joint names, EE site, limits, etc.
         grasp_manager: GraspManager,
         gripper: Gripper | None = None,
         ik_solver: IKSolver | None = None,
-        name: str = "",             # e.g., "left", "right", "franka"
+        name: str = "",  # e.g., "left", "right", "franka"
     ): ...
 ```
 
@@ -211,6 +220,7 @@ from mj_manipulator import Arm, GraspManager, ArmConfig
 from geodude.gripper import Robotiq2F140
 from geodude.ur5e import create_ur5e_ik_solver
 
+
 class Geodude:
     def __init__(self, config, objects=None):
         self.env = Environment(...)
@@ -220,7 +230,8 @@ class Geodude:
         right_gripper = Robotiq2F140(self.env, "right", config.right_arm, self.grasp_manager)
 
         self.left_arm = Arm(
-            env=self.env, config=config.left_arm,
+            env=self.env,
+            config=config.left_arm,
             grasp_manager=self.grasp_manager,
             gripper=left_gripper,
             ik_solver=create_ur5e_ik_solver(self.env, config.left_arm),
@@ -239,7 +250,8 @@ from mj_manipulator.primitives import pickup
 from mj_manipulator.cartesian import execute_twist
 
 franka_config = ArmConfig(
-    name="franka", entity_type="arm",
+    name="franka",
+    entity_type="arm",
     joint_names=[f"franka/joint{i}" for i in range(1, 8)],
     ee_site="franka/ee_site",
     gripper_actuator="franka/gripper_actuator",
@@ -253,8 +265,9 @@ franka_config = ArmConfig(
 
 grasp_manager = GraspManager(env.model, env.data)
 gripper = FrankaHand(env, franka_config, grasp_manager)  # implements Gripper protocol
-arm = Arm(env=env, config=franka_config, grasp_manager=grasp_manager,
-          gripper=gripper, ik_solver=FrankaIK(env), name="franka")
+arm = Arm(
+    env=env, config=franka_config, grasp_manager=grasp_manager, gripper=gripper, ik_solver=FrankaIK(env), name="franka"
+)
 
 # --- Simulation (MuJoCo) ---
 with SimContext(env, arms={"franka": arm}, physics=True) as ctx:
@@ -304,14 +317,14 @@ Current `RobotPhysicsController` hardcodes "left"/"right" arms. Generic version 
 
 ```python
 class PhysicsController:
-    def __init__(self, env, arms: dict[str, Arm], grippers: dict[str, Gripper],
-                 physics_config: PhysicsConfig, viewer=None): ...
+    def __init__(
+        self, env, arms: dict[str, Arm], grippers: dict[str, Gripper], physics_config: PhysicsConfig, viewer=None
+    ): ...
 
     def step(self, targets: dict[str, np.ndarray] | None = None) -> None:
         """Step all arms toward their targets."""
 
-    def step_cartesian(self, arm_name: str, position: np.ndarray,
-                       velocity: np.ndarray | None = None) -> None:
+    def step_cartesian(self, arm_name: str, position: np.ndarray, velocity: np.ndarray | None = None) -> None:
         """Reactive step for cartesian control."""
 
     def execute(self, arm_name: str, trajectory: Trajectory) -> None: ...
@@ -329,9 +342,15 @@ class SimContext:
     - Kinematic: perfect tracking, no physics (fast for planning visualization)
     - Physics: MuJoCo physics stepping with PD control (realistic execution)
     """
-    def __init__(self, env, arms: dict[str, Arm],
-                 physics: bool = False, viewer: bool = True,
-                 physics_config: PhysicsConfig | None = None): ...
+
+    def __init__(
+        self,
+        env,
+        arms: dict[str, Arm],
+        physics: bool = False,
+        viewer: bool = True,
+        physics_config: PhysicsConfig | None = None,
+    ): ...
 ```
 
 Takes `arms: dict[str, Arm]` instead of assuming `robot.left_arm`/`robot.right_arm`. Camera setup becomes optional/configurable rather than hardcoded Geodude angles.
@@ -345,8 +364,8 @@ class UR5eHardwareContext:
 
     Same interface as SimContext — all primitives and policies work unchanged.
     """
-    def __init__(self, robot_ip: str, arms: dict[str, Arm],
-                 control_rate: float = 500.0): ...
+
+    def __init__(self, robot_ip: str, arms: dict[str, Arm], control_rate: float = 500.0): ...
 
     def execute(self, item) -> bool:
         # Stream trajectory to UR RTDE servoj interface

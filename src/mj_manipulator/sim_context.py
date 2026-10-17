@@ -41,13 +41,14 @@ if TYPE_CHECKING:
     from mj_manipulator.config import PhysicsConfig
     from mj_manipulator.controller import Controller
     from mj_manipulator.event_loop import PhysicsEventLoop
-    from mj_manipulator.ownership import OwnershipRegistry, OwnerKind
+    from mj_manipulator.ownership import OwnershipRegistry
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # SiblingFailureSignal
 # ---------------------------------------------------------------------------
+
 
 class _SiblingFailureSignal:
     """Shared failure flag for one batch of trajectories executed together.
@@ -105,6 +106,8 @@ class SimArmController:
         Args:
             object_name: Name of the object to grasp, or None to grasp
                 whatever is between the fingers.
+            synchronous: Accepted for ArmController parity; ignored in sim,
+                where the close runs to completion either way.
 
         Returns:
             Name of grasped object if successful, None otherwise.
@@ -202,6 +205,7 @@ class SimArmController:
         Args:
             object_name: Specific object to release, or None for all
                 objects held by this arm.
+            synchronous: Accepted for ArmController parity; ignored in sim.
         """
         gripper = self._arm.gripper
         if gripper is None:
@@ -491,7 +495,7 @@ class SimContext:
           blocks on Future. The inputhook pumps tick() on the owner thread.
         """
         from mj_manipulator.ownership import OwnerKind
-        from mj_manipulator.planning import PlanResult, PlanGroupResult
+        from mj_manipulator.planning import PlanGroupResult, PlanResult
         from mj_manipulator.trajectory import Trajectory
 
         if isinstance(item, PlanResult):
@@ -510,10 +514,9 @@ class SimContext:
         for i, traj in enumerate(trajectories[1:], start=1):
             if not np.allclose(traj.timestamps, first_timestamps):
                 raise ValueError(
-                    f"Trajectory {i} timestamps do not match trajectory 0: "
-                    f"{traj.timestamps} vs {first_timestamps}"
+                    f"Trajectory {i} timestamps do not match trajectory 0: {traj.timestamps} vs {first_timestamps}"
                 )
-            
+
         self._deactivate_teleop_for_item(item)
 
         signal = _SiblingFailureSignal()
@@ -536,7 +539,7 @@ class SimContext:
             if entity is None:
                 raise ValueError("Trajectory has no entity set")
 
-            runner_abort_fn = self._build_abort_fn(entity, abort_fn, failure_signal=signal) 
+            runner_abort_fn = self._build_abort_fn(entity, abort_fn, failure_signal=signal)
             if self._ownership is not None:
                 self._ownership.acquire(entity, OwnerKind.TRAJECTORY, traj)
 
@@ -621,7 +624,7 @@ class SimContext:
     ) -> Callable[[], bool] | None:
         """Build the per-entity abort predicate composing ownership abort,
         context-level abort, drop-check, and the caller-supplied abort_fn.
- 
+
         Factored out of _execute_tick_driven so both the single-item path
         and the multi-trajectory "start pass" can share it without
         duplicating the closure-building logic.
@@ -630,7 +633,7 @@ class SimContext:
             reg = self._ownership
             ctx_abort = self._abort_fn
             drop_check = self._make_drop_abort()
- 
+
             def _abort(e=entity, ca=caller_abort, fs=failure_signal) -> bool:
                 if reg is not None and reg.is_aborted(e):
                     return True
@@ -643,13 +646,13 @@ class SimContext:
                 if fs is not None and fs.triggered():
                     return True
                 return False
- 
+
             return _abort
- 
+
         ctx_abort = self._abort_fn
         drop_check = self._make_drop_abort()
         if caller_abort is not None or ctx_abort is not None or drop_check is not None or failure_signal is not None:
- 
+
             def _abort(ca=caller_abort, cx=ctx_abort, dc=drop_check, fs=failure_signal) -> bool:
                 if cx is not None and cx():
                     return True
@@ -660,9 +663,9 @@ class SimContext:
                 if fs is not None and fs.triggered():
                     return True
                 return False
- 
+
             return _abort
- 
+
         return None
 
     def _execute_impl(
@@ -672,7 +675,7 @@ class SimContext:
         abort_fn: Callable[[], bool] | None = None,
     ) -> bool:
         """Execute implementation — synchronous, always runs on the physics thread."""
-        from mj_manipulator.planning import PlanResult, PlanGroupResult
+        from mj_manipulator.planning import PlanGroupResult, PlanResult
         from mj_manipulator.trajectory import Trajectory
 
         # In the kinematic/legacy path, abort checks happen between
@@ -962,7 +965,7 @@ class SimContext:
         if self._ownership is None:
             return
         from mj_manipulator.ownership import OwnerKind
-        from mj_manipulator.planning import PlanResult, PlanGroupResult
+        from mj_manipulator.planning import PlanGroupResult, PlanResult
         from mj_manipulator.trajectory import Trajectory
 
         if isinstance(item, PlanResult):

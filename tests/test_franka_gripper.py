@@ -145,6 +145,23 @@ class TestFrankaGripperKinematic:
         pos_closed = franka_gripper.get_actual_position()
         assert 0.9 <= pos_closed <= 1.0
 
+    def test_set_width_round_trips(self, franka_gripper):
+        """set_width takes a fraction open; get_width reads it back."""
+        for width in (1.0, 0.5, 0.0):
+            assert franka_gripper.set_width(width) is True
+            assert franka_gripper.get_width() == pytest.approx(width, abs=0.05)
+
+    def test_set_width_clamps(self, franka_gripper):
+        franka_gripper.set_width(1.7)
+        assert franka_gripper.get_width() == pytest.approx(1.0, abs=0.05)
+        franka_gripper.set_width(-0.3)
+        assert franka_gripper.get_width() == pytest.approx(0.0, abs=0.05)
+
+
+# ---------------------------------------------------------------------------
+# GraspManager integration
+# ---------------------------------------------------------------------------
+
 
 # ---------------------------------------------------------------------------
 # GraspManager integration

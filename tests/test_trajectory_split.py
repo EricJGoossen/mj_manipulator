@@ -1,29 +1,30 @@
-"""Tests for Trajectory.split_trajectory() -- the method-on-Trajectory design.
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Siddhartha Srinivasa
 
-Superseding notes vs. an earlier standalone-function version:
-- API changed: this is combined.split_trajectory(arm_group), a method,
-  not split_trajectory(combined, arm_group). Every call site differs.
-- The joint-name-order test needed a NEW case: swapping order WITHIN one
-  arm's own slice, not swapping across arm boundaries. A full-list
-  reversal is caught even by a plain membership check (none of the names
-  belong to that arm at all), so it never actually exercised the
-  positional-equality fix.
+"""Tests for :meth:`mj_manipulator.trajectory.Trajectory.split_trajectory`.
+
+Covers splitting a combined ArmGroup trajectory into per-arm trajectories:
+DOF and joint-name validation (including joints reordered within one arm's
+slice, which a membership check alone would miss), per-arm entity names,
+and shared timestamps.
 """
+
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from mj_manipulator.trajectory import Trajectory
 from mj_manipulator.arm_group import ArmGroup
 from mj_manipulator.config import ArmConfig, ArmGroupConfig, KinematicLimits, PlanningDefaults
+from mj_manipulator.trajectory import Trajectory
 
 
 class FakeArm:
     def __init__(self, name: str, dof: int):
         self.dof = dof
         self.config = ArmConfig(
-            name=name, entity_type="arm",
+            name=name,
+            entity_type="arm",
             joint_names=[f"{name}_j{i}" for i in range(dof)],
             kinematic_limits=KinematicLimits(velocity=np.full(dof, 1.0), acceleration=np.full(dof, 2.0)),
         )
@@ -35,7 +36,8 @@ def make_group(left_dof: int, right_dof: int) -> ArmGroup:
     left = FakeArm("left", left_dof)
     right = FakeArm("right", right_dof)
     config = ArmGroupConfig(
-        name="bimanual", entity_type="arm_group",
+        name="bimanual",
+        entity_type="arm_group",
         joint_names=left.config.joint_names + right.config.joint_names,
         planning_defaults=PlanningDefaults(),
     )

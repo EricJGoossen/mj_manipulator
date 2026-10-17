@@ -35,7 +35,6 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from mj_manipulator.arm import Arm
     from mj_manipulator.arm_group import ArmGroup
     from mj_manipulator.grasp_manager import GraspManager
     from mj_manipulator.protocols import GraspSource

@@ -69,8 +69,7 @@ def safe_retract(
     """
     if not np.allclose(twist[3:], 0.0):
         raise NotImplementedError(
-            f"safe_retract currently handles translational twists only; "
-            f"got angular components {twist[3:]}"
+            f"safe_retract currently handles translational twists only; got angular components {twist[3:]}"
         )
 
     linear = np.asarray(twist[:3], dtype=float)
@@ -82,10 +81,7 @@ def safe_retract(
     direction = linear / linear_norm
 
     start_poses = arm_group.get_ee_pose()
-    start_positions = [
-        pose[:3, 3].copy()
-        for pose in start_poses
-    ]
+    start_positions = [pose[:3, 3].copy() for pose in start_poses]
 
     goals = {}
 
@@ -111,8 +107,7 @@ def safe_retract(
 
     end_poses = arm_group.get_ee_pose()
     distances_traveled = [
-        float(np.dot(end_pose[:3, 3] - start_pos, direction))
-        for end_pose, start_pos in zip(end_poses, start_positions)
+        float(np.dot(end_pose[:3, 3] - start_pos, direction)) for end_pose, start_pos in zip(end_poses, start_positions)
     ]
 
     distance_traveled = min(distances_traveled)
@@ -120,10 +115,7 @@ def safe_retract(
     logger.info(
         "safe_retract: moved %.3fm along twist (arms: %s)",
         distance_traveled,
-        ", ".join(
-            f"{name}={distance:.3f}m"
-            for name, distance in zip(arm_group.arms, distances_traveled)
-        ),
+        ", ".join(f"{name}={distance:.3f}m" for name, distance in zip(arm_group.arms, distances_traveled)),
     )
 
     return distance_traveled
@@ -176,4 +168,3 @@ def translational_waypoints(
         pose[:3, 3] = start_trans + unit * step
         waypoints.append(pose)
     return waypoints
-

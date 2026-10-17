@@ -107,9 +107,10 @@ class Trajectory:
         Returns:
             A dictionary mapping arm names to their corresponding Trajectory.
         """
-        if self.positions.shape[1] != sum(arm.dof for arm in arm_group.arms.values()):
+        group_dof = sum(arm.dof for arm in arm_group.arms.values())
+        if self.positions.shape[1] != group_dof:
             raise ValueError(
-                f"Trajectory DOF {self.positions.shape[1]} doesn't match total DOF of arm group {sum(arm.dof for arm in arm_group.arms.values())}"
+                f"Trajectory DOF {self.positions.shape[1]} doesn't match total DOF of arm group {group_dof}"
             )
 
         per_arm_trajectories = {}
@@ -121,7 +122,7 @@ class Trajectory:
             # Check all names in trajectory_names are in arm_group.arms[arm_name].joint_names
             trajectory_names = None
             if self.joint_names is not None:
-                trajectory_names = self.joint_names[total_dof - arm_dof:total_dof]
+                trajectory_names = self.joint_names[total_dof - arm_dof : total_dof]
 
                 if trajectory_names != list(arm_group[arm_name].config.joint_names):
                     raise ValueError(
@@ -132,9 +133,9 @@ class Trajectory:
 
             per_arm_trajectories[arm_name] = Trajectory(
                 timestamps=self.timestamps,
-                positions=self.positions[:, total_dof - arm_dof:total_dof],
-                velocities=self.velocities[:, total_dof - arm_dof:total_dof],
-                accelerations=self.accelerations[:, total_dof - arm_dof:total_dof],
+                positions=self.positions[:, total_dof - arm_dof : total_dof],
+                velocities=self.velocities[:, total_dof - arm_dof : total_dof],
+                accelerations=self.accelerations[:, total_dof - arm_dof : total_dof],
                 entity=arm_name,
                 joint_names=trajectory_names,
             )
@@ -237,7 +238,10 @@ class Trajectory:
 
             for attempt in range(retime_max_iters):
                 timestamps, positions, velocities, accelerations = cls._solve_toppra(
-                    path_positions, vel_limits, working_acc_limits, control_dt,
+                    path_positions,
+                    vel_limits,
+                    working_acc_limits,
+                    control_dt,
                     n_gridpoints=n_gridpoints,
                 )
                 amax = np.max(np.abs(accelerations), axis=0)
@@ -362,6 +366,7 @@ class Trajectory:
             timestamps = np.append(timestamps, duration)
 
         return timestamps, jnt_traj(timestamps), jnt_traj(timestamps, 1), jnt_traj(timestamps, 2)
+
 
 def create_linear_trajectory(
     start: float,

@@ -41,7 +41,6 @@ from mj_manipulator.planning import PlanGroupResult
 from mj_manipulator.sim_context import SimContext
 from mj_manipulator.trajectory import Trajectory
 
-
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------

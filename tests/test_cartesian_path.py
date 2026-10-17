@@ -27,6 +27,7 @@ from mj_manipulator.safe_retract import translational_waypoints
 # helpers
 # ---------------------------------------------------------------------------
 
+
 def _one_arm_group(arm):
     return ArmGroup(
         {arm.config.name: arm},
@@ -36,6 +37,7 @@ def _one_arm_group(arm):
             joint_names=arm.config.joint_names,
         ),
     )
+
 
 # ---------------------------------------------------------------------------
 # translational_waypoints — pure logic, no menagerie

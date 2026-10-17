@@ -15,8 +15,8 @@ or on a real robot:
         ctx.arm("franka").grasp("mug")
 """
 
-from mj_manipulator.arm_group import ArmGroup, ContextRobotModel
 from mj_manipulator.arm import Arm, ArmRobotModel
+from mj_manipulator.arm_group import ArmGroup, ContextRobotModel
 from mj_manipulator.cartesian import (
     CartesianControlConfig,
     CartesianController,
@@ -58,7 +58,7 @@ from mj_manipulator.outcome import FailureKind, Outcome, failure, success
 from mj_manipulator.ownership import OwnerKind, OwnershipRegistry
 from mj_manipulator.perception import SimPerceptionService
 from mj_manipulator.physics_controller import ArmPhysicsExecutor, PhysicsController
-from mj_manipulator.planning import PlanResult, PlanGroupResult
+from mj_manipulator.planning import PlanGroupResult, PlanResult
 from mj_manipulator.protocols import (
     ArmController,
     ExecutionContext,

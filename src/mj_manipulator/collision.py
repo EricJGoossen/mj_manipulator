@@ -219,6 +219,15 @@ class CollisionChecker:
         return contacts
 
     def body_ids_for_joints(self, joint_names: list[str], extra_body_names: list[str] | None = None) -> set[int]:
+        """Body ids moved by ``joint_names``, plus ``extra_body_names``.
+
+        Each joint's body and all its descendants are included, so the
+        result is every body that belongs to the arm (or tool) those
+        joints drive.
+
+        Raises:
+            ValueError: A joint name is not in the model.
+        """
         ids: set[int] = set()
         for name in joint_names:
             joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)

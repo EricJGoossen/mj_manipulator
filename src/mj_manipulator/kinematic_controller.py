@@ -25,7 +25,6 @@ from mj_manipulator.config import ExecutionConfig
 from mj_manipulator.controller import Controller
 
 if TYPE_CHECKING:
-    from mj_manipulator.arm import Arm
     from mj_manipulator.arm_group import ArmGroup
 
 logger = logging.getLogger(__name__)
